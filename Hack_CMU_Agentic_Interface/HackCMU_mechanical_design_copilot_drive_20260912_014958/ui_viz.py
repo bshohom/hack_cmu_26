@@ -175,7 +175,7 @@ def imported_candidate_mesh_figure(candidate: ImportedCandidateGeometry) -> go.F
 
 
 @lru_cache(maxsize=8)
-def _load_mesh_arrays(mesh_path: str, max_faces: int = 150_000):
+def _load_mesh_arrays(mesh_path: str, max_faces: int = 60_000):
     """(vertices, faces) for STL/OBJ/PLY via trimesh; OBJ text parser as fallback."""
     try:
         import trimesh

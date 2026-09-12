@@ -1576,11 +1576,15 @@ with center:
     if state.geometry is not None:
         st.info(geometry_provenance_text(st.session_state.get("mode_geom")))
 
-    candidate = state.imported_candidate or imported_candidate_for_mode(
-        st.session_state.get("mode_geom")
+    orch_candidate = getattr(st.session_state.get("orch"), "imported_candidate", None)
+    candidate = (
+        state.imported_candidate
+        or orch_candidate
+        or imported_candidate_for_mode(st.session_state.get("mode_geom"), _candidate_name())
     )
     if candidate is not None:
         st.markdown("**IMPORTED CANDIDATE MESH**")
+        st.caption(f"Candidate: {CANDIDATES[candidate.candidate_name].label if candidate.candidate_name in CANDIDATES else candidate.candidate_name}")
         st.caption(candidate.provenance)
         representation = st.radio(
             "Candidate representation",
