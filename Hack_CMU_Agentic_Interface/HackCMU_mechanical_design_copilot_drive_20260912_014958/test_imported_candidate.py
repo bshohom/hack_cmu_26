@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import unittest
+from unittest import mock
 
 from imported_candidate import (
     CANDIDATE_DIR,
@@ -10,12 +12,15 @@ from imported_candidate import (
     MESH_NAME,
     PARTICLES_NAME,
     check_candidate_fit,
+    fit_family_for,
+    load_candidate,
     load_imported_candidate,
 )
 from orchestrator import Orchestrator
 from schemas import (
     CandidateFitStatus,
     RequirementsUpdate,
+    TopologySolverOptions,
     UserRequirements,
     WorkflowStage,
 )
@@ -188,3 +193,179 @@ class UnknownFitTests(unittest.TestCase):
         self.assertTrue(result.fits, result.message)
         # and it does not overclaim what was actually verified
         self.assertIn("not checked", result.message)
+
+
+class TaskAwareFitTests(unittest.TestCase):
+    """Cupholder, hook, and shelf must not share a single inner-diameter check."""
+
+    def _hook_requirements(self) -> UserRequirements:
+        req = UserRequirements()
+        req.object_geometry.kind = "strap"
+        req.object_geometry.bottle_diameter_mm = 30.0
+        req.payload.filled_mass_kg = 5.0
+        req.environment.desk_thickness_mm = 20.0
+        req.design_envelope.max_protrusion_mm = 110.0
+        return req
+
+    def test_desk_hook_does_not_use_inner_diameter(self) -> None:
+        candidate = load_candidate("desk_bag_hook")
+        self.assertEqual(fit_family_for(candidate), "desk_bag_hook")
+        self.assertIsNone(candidate.inner_diameter_mm)
+        self.assertEqual(candidate.dimensions.get("hook_opening"), 30.0)
+        fit = check_candidate_fit(self._hook_requirements(), candidate)
+        by_name = {c.name: c for c in fit.checks}
+        self.assertNotIn("inner diameter", fit.message.lower())
+        self.assertNotIn("holder opening", by_name["payload_fit"].message.lower())
+        self.assertEqual(by_name["payload_fit"].status, CandidateFitStatus.PASS)
+        self.assertEqual(by_name["payload_fit"].required_mm, 30.0)
+        self.assertEqual(by_name["payload_fit"].available_mm, 30.0)
+        self.assertEqual(by_name["desk_fit"].status, CandidateFitStatus.PASS)
+        self.assertEqual(by_name["desk_fit"].desk_mm, 20.0)
+        self.assertEqual(by_name["desk_fit"].supported_range_mm, (18.0, 22.0))
+        self.assertEqual(by_name["envelope_fit"].status, CandidateFitStatus.PASS)
+        self.assertAlmostEqual(by_name["envelope_fit"].available_mm, 106.85, places=1)
+        self.assertEqual(by_name["load_rating"].status, CandidateFitStatus.PASS)
+        self.assertEqual(by_name["load_rating"].required_mm, 5.0)
+        self.assertEqual(by_name["load_rating"].available_mm, 5.0)
+        self.assertTrue(fit.fits, fit.message)
+        from imported_candidate import candidate_fit_questions
+
+        blob = " ".join(q.question.lower() for q in candidate_fit_questions(fit, family="desk_bag_hook"))
+        self.assertNotIn("inner diameter", blob)
+
+    def test_desk_hook_strap_wider_than_opening_fails(self) -> None:
+        req = self._hook_requirements()
+        req.object_geometry.bottle_diameter_mm = 40.0
+        fit = check_candidate_fit(req, load_candidate("desk_bag_hook"))
+        by_name = {c.name: c for c in fit.checks}
+        self.assertEqual(by_name["payload_fit"].status, CandidateFitStatus.FAIL)
+        self.assertFalse(fit.fits)
+
+    def test_stapler_shelf_uses_platform_not_cup(self) -> None:
+        candidate = load_candidate("stapler_shelf")
+        self.assertEqual(fit_family_for(candidate), "stapler_shelf")
+        self.assertIsNone(candidate.inner_diameter_mm)
+        req = UserRequirements()
+        req.object_geometry.kind = "box"
+        req.object_geometry.bottle_diameter_mm = 60.0
+        req.payload.filled_mass_kg = 0.5
+        req.environment.desk_thickness_mm = 20.0
+        req.design_envelope.max_protrusion_mm = 120.0
+        fit = check_candidate_fit(req, candidate)
+        names = {c.name for c in fit.checks}
+        self.assertEqual(names, {"payload_fit", "envelope_fit"})
+        self.assertNotIn("desk_fit", names)
+        by_name = {c.name: c for c in fit.checks}
+        self.assertEqual(by_name["payload_fit"].status, CandidateFitStatus.PASS)
+        self.assertEqual(by_name["payload_fit"].available_mm, 70.0)
+        self.assertEqual(by_name["envelope_fit"].status, CandidateFitStatus.PASS)
+        self.assertEqual(by_name["envelope_fit"].available_mm, 120.0)
+        self.assertTrue(fit.fits, fit.message)
+        self.assertNotIn("inner diameter", fit.message.lower())
+        self.assertNotIn("holder opening", by_name["payload_fit"].message.lower())
+
+    def test_stapler_shelf_footprint_too_wide_fails(self) -> None:
+        candidate = load_candidate("stapler_shelf")
+        req = UserRequirements()
+        req.object_geometry.bottle_diameter_mm = 80.0
+        req.design_envelope.max_protrusion_mm = 120.0
+        fit = check_candidate_fit(req, candidate)
+        self.assertEqual({c.name: c.status for c in fit.checks}["payload_fit"], CandidateFitStatus.FAIL)
+        self.assertFalse(fit.fits)
+
+    def test_cupholder_still_uses_inner_diameter(self) -> None:
+        candidate = load_imported_candidate()
+        self.assertEqual(fit_family_for(candidate), "cupholder")
+        req = UserRequirements()
+        req.object_geometry.bottle_diameter_mm = 65.0
+        req.environment.desk_thickness_mm = 25.0
+        req.design_envelope.max_protrusion_mm = 150.0
+        fit = check_candidate_fit(req, candidate)
+        by_name = {c.name: c for c in fit.checks}
+        self.assertEqual(by_name["payload_fit"].available_mm, 70.0)
+        self.assertIn("holder opening", by_name["payload_fit"].message.lower())
+        self.assertTrue(fit.fits)
+
+    def test_desk_hook_live_case_reaches_structure(self) -> None:
+        orch = Orchestrator(
+            fixtures=fixtures_for_geometry_mode(GEOM_IMPORTED),
+            imported_candidate=load_candidate("desk_bag_hook"),
+        )
+        orch.ingest_user_request(
+            "I want a hook clamped under my desk edge to hang a 5 kg bag about 100 mm out from the edge."
+        )
+        orch.apply_answers(
+            RequirementsUpdate(
+                filled_bottle_mass_kg=5.0,
+                bottle_diameter_mm=30.0,
+                bottle_height_mm=300.0,
+                desk_thickness_mm=20.0,
+                attachment_method="clamp",
+                allowed_contact_region="desk_front_edge",
+                max_protrusion_mm=110.0,
+                manufacturing_method="3d_print",
+                material="PLA",
+                max_part_mass_kg=0.3,
+            )
+        )
+        orch.run()
+        self.assertIsNotNone(orch.state.candidate_fit)
+        self.assertTrue(orch.state.candidate_fit.fits, orch.state.candidate_fit.message)
+        self.assertNotIn("inner diameter", orch.state.candidate_fit.message.lower())
+        self.assertIsNotNone(orch.state.structure)
+        self.assertNotEqual(orch.state.stage, WorkflowStage.REQUEST_INFORMATION)
+        loads = orch.state.structure.load_regions if orch.state.structure else []
+        self.assertTrue(any(r.name == "strap_seat" for r in loads))
+        self.assertFalse(any(r.name == "cup_cavity" for r in loads))
+
+
+@unittest.skipUnless(os.environ.get("TO_AGENT_LIVE") == "1", "live to_agent smoke")
+class DeskHookLiveTopologyTests(unittest.TestCase):
+    """2-iter live SIMP: Candidate Fit → STRUCTURE → real to_agent → CAD STL."""
+
+    def test_desk_hook_two_iter_smoke(self) -> None:
+        orch = Orchestrator(
+            fixtures=fixtures_for_geometry_mode(GEOM_IMPORTED, topology_live=True),
+            imported_candidate=load_candidate("desk_bag_hook"),
+            topology_options=TopologySolverOptions(
+                element_size_mm=8.0,
+                max_iters=2,
+                time_budget_s=180.0,
+                device="cpu",
+            ),
+        )
+        orch.ingest_user_request(
+            "I want a hook clamped under my desk edge to hang a 5 kg bag about 100 mm out from the edge."
+        )
+        orch.apply_answers(
+            RequirementsUpdate(
+                filled_bottle_mass_kg=5.0,
+                bottle_diameter_mm=30.0,
+                bottle_height_mm=300.0,
+                desk_thickness_mm=20.0,
+                attachment_method="clamp",
+                allowed_contact_region="desk_front_edge",
+                max_protrusion_mm=110.0,
+                manufacturing_method="3d_print",
+                material="PLA",
+                max_part_mass_kg=0.3,
+            )
+        )
+        with mock.patch.dict(os.environ, {"TO_AGENT_MODE": "live"}):
+            orch.run()
+        self.assertTrue(orch.state.candidate_fit and orch.state.candidate_fit.fits)
+        self.assertTrue(any(r.name == "strap_seat" for r in orch.state.structure.load_regions))
+        self.assertFalse(any(r.name == "cup_cavity" for r in orch.state.structure.load_regions))
+        topo = orch.state.topology
+        self.assertIsNotNone(topo)
+        self.assertFalse(topo.is_mock)
+        self.assertTrue((topo.optimized_geometry_ref or "").endswith("design.stl"))
+        self.assertTrue(topo.optimized_geometry_ref and os.path.isfile(topo.optimized_geometry_ref))
+        self.assertEqual(topo.acceptance.get("acceptance_status"), "unresolved_not_converged")
+        self.assertIsNotNone(orch.state.cad)
+        self.assertFalse(orch.state.cad.is_mock)
+        self.assertEqual(orch.state.cad.filename, topo.optimized_geometry_ref)
+        self.assertIn(
+            orch.state.stage,
+            {WorkflowStage.COMPLETE, WorkflowStage.VERIFICATION_FAILED},
+        )
