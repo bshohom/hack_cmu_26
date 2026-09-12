@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 from fixtures import load_integration_fixtures
-from imported_candidate import load_imported_candidate
+from imported_candidate import load_candidate, load_imported_candidate
 from schemas import ImportedCandidateGeometry, IntegrationFixtures
 from state import DesignState
 
@@ -111,10 +111,14 @@ def fixtures_for_geometry_mode(mode: Optional[str], topology_live: bool = False)
     return base
 
 
-def imported_candidate_for_mode(mode: Optional[str]) -> Optional[ImportedCandidateGeometry]:
+def imported_candidate_for_mode(
+    mode: Optional[str], name: str = "cupholder"
+) -> Optional[ImportedCandidateGeometry]:
     if effective_geometry_mode(mode) != GEOM_IMPORTED:
         return None
-    return load_imported_candidate()
+    if name == "cupholder":
+        return load_imported_candidate()
+    return load_candidate(name)
 
 
 def geometry_provenance_text(mode: Optional[str]) -> str:

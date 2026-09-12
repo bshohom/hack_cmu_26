@@ -7,6 +7,7 @@ It reads the three cup-holder files under examples/imported_candidate/.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -23,11 +24,55 @@ CANDIDATE_DIR = Path(__file__).resolve().parent / "examples" / "imported_candida
 DIMENSIONS_NAME = "cupholder_dimensions.txt"
 MESH_NAME = "cupholder_single_piece_PLA.obj"
 PARTICLES_NAME = "cupholder_surface_particles.obj"
+# Demo triples dropped at the hack_cmu_26 repo root (not copied: 7-13 MB STLs).
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 PROVENANCE = "external generated concept geometry"
 
 _RANGE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*[–—-]\s*(\d+(?:\.\d+)?)")
 _NUMBER_RE = re.compile(r"(-?\d+(?:\.\d+)?)")
+
+
+@dataclass(frozen=True)
+class CandidateFiles:
+    """One `<mesh> + <name>_dimensions.txt + <name>_particles.obj` triple and its TO task key."""
+
+    name: str
+    task: str  # builder key in to_agent.demo.registry
+    directory: Path
+    mesh: str
+    dimensions: str
+    particles: str
+    label: str = ""
+
+    def paths(self) -> Dict[str, Path]:
+        return {
+            "dimensions": self.directory / self.dimensions,
+            "mesh": self.directory / self.mesh,
+            "particles": self.directory / self.particles,
+        }
+
+
+CANDIDATES: Dict[str, CandidateFiles] = {
+    "cupholder": CandidateFiles(
+        "cupholder", "cupholder", CANDIDATE_DIR, MESH_NAME, DIMENSIONS_NAME, PARTICLES_NAME,
+        "Desk-clamp cup holder (1 L bottle)",
+    ),
+    "desk_bag_hook": CandidateFiles(
+        "desk_bag_hook", "desk_bag_hook", REPO_ROOT,
+        "desk_bag_hook_5kg_100mm_final.stl",
+        "desk_bag_hook_5kg_100mm_final_dimensions.txt",
+        "desk_bag_hook_5kg_100mm_final_particles.obj",
+        "Desk bag hook (5 kg, 100 mm reach)",
+    ),
+    "stapler_shelf": CandidateFiles(
+        "stapler_shelf", "stapler_shelf", REPO_ROOT,
+        "stapler_shelf_100mm_guaranteed_flat_top.stl",
+        "stapler_shelf_100mm_guaranteed_flat_top_dimensions.txt",
+        "stapler_shelf_100mm_guaranteed_flat_top_particles.obj",
+        "Stapler shelf (100 mm lift, flat top)",
+    ),
+}
 
 
 def default_candidate_paths(root: Optional[Path] = None) -> Dict[str, Path]:
@@ -40,7 +85,40 @@ def default_candidate_paths(root: Optional[Path] = None) -> Dict[str, Path]:
 
 
 def load_imported_candidate(root: Optional[Path] = None) -> ImportedCandidateGeometry:
-    paths = default_candidate_paths(root)
+    return _load_candidate_paths(default_candidate_paths(root), name="cupholder", task="cupholder")
+
+
+def load_candidate(name: str = "cupholder") -> ImportedCandidateGeometry:
+    """Load any registered candidate triple by name."""
+    if name not in CANDIDATES:
+        raise KeyError(f"unknown candidate {name!r}; known: {sorted(CANDIDATES)}")
+    files = CANDIDATES[name]
+    return _load_candidate_paths(files.paths(), name=files.name, task=files.task)
+
+
+def _mesh_stats(mesh_path: Path) -> Dict[str, object]:
+    """Vertex/face counts, watertightness, components and bbox via trimesh (STL/OBJ/PLY)."""
+    try:
+        import trimesh
+
+        mesh = trimesh.load(mesh_path, force="mesh")
+        lo, hi = mesh.bounds
+        return {
+            "vertex_count": int(len(mesh.vertices)),
+            "face_count": int(len(mesh.faces)),
+            "watertight": bool(mesh.is_watertight),
+            "connected_components": int(len(mesh.split(only_watertight=False))),
+            "bbox_min": tuple(float(v) for v in lo),
+            "bbox_max": tuple(float(v) for v in hi),
+        }
+    except Exception:  # noqa: BLE001 — fall back to the OBJ text parser
+        vertices, faces = parse_obj_mesh(mesh_path)
+        bbox_min, bbox_max = bounding_box(vertices)
+        return {"vertex_count": len(vertices), "face_count": len(faces), "watertight": None,
+                "connected_components": None, "bbox_min": bbox_min, "bbox_max": bbox_max}
+
+
+def _load_candidate_paths(paths: Dict[str, Path], name: str, task: str) -> ImportedCandidateGeometry:
     mesh_path = paths["mesh"]
     if not mesh_path.is_file():
         raise FileNotFoundError(f"Imported candidate mesh is missing: {mesh_path}")
@@ -48,12 +126,29 @@ def load_imported_candidate(root: Optional[Path] = None) -> ImportedCandidateGeo
     particle_path = paths["particles"] if paths["particles"].is_file() else None
 
     meta: Dict[str, object] = {}
+    numeric: Dict[str, float] = {}
     if dimensions_path is not None:
-        meta = parse_candidate_dimensions(dimensions_path.read_text())
+        text = dimensions_path.read_text()
+        meta = parse_candidate_dimensions(text)
+        numeric = parse_all_numeric(text)
 
-    vertices, faces = parse_obj_mesh(mesh_path)
-    bbox_min, bbox_max = bounding_box(vertices)
+    stats = _mesh_stats(mesh_path)
+    bbox_min, bbox_max = stats["bbox_min"], stats["bbox_max"]
 
+    # Fit-check fields for clamp-style parts whose dimension files use other labels
+    desk_gap = _as_float(meta.get("desk_gap_mm"))
+    desk_min = _as_float(meta.get("compatible_desk_min_mm"))
+    desk_max = _as_float(meta.get("compatible_desk_max_mm"))
+    if desk_gap is None and "clamp_internal_gap" in numeric:
+        desk_gap = numeric["clamp_internal_gap"]
+    if desk_min is None and desk_max is None and desk_gap is not None and "desk_thickness_reference" in numeric:
+        desk_min, desk_max = numeric["desk_thickness_reference"] - 2.0, desk_gap
+    clamp_reach = _as_float(meta.get("clamp_reach_mm"))
+    if clamp_reach is None and desk_gap is not None and bbox_max is not None:
+        clamp_reach = float(bbox_max[0])  # protrusion of a clamp part = x extent in desk_edge_frame
+
+    watertight = _as_bool(meta.get("watertight"))
+    components = _as_int(meta.get("connected_components"))
     return ImportedCandidateGeometry(
         mesh_path=str(mesh_path),
         particle_path=str(particle_path) if particle_path is not None else None,
@@ -65,20 +160,46 @@ def load_imported_candidate(root: Optional[Path] = None) -> ImportedCandidateGeo
         base_thickness_mm=_as_float(meta.get("base_thickness_mm")),
         arm_width_mm=_as_float(meta.get("arm_width_mm")),
         top_plate_thickness_mm=_as_float(meta.get("top_plate_thickness_mm")),
-        desk_gap_mm=_as_float(meta.get("desk_gap_mm")),
-        compatible_desk_min_mm=_as_float(meta.get("compatible_desk_min_mm")),
-        compatible_desk_max_mm=_as_float(meta.get("compatible_desk_max_mm")),
+        desk_gap_mm=desk_gap,
+        compatible_desk_min_mm=desk_min,
+        compatible_desk_max_mm=desk_max,
         lower_hook_thickness_mm=_as_float(meta.get("lower_hook_thickness_mm")),
-        clamp_reach_mm=_as_float(meta.get("clamp_reach_mm")),
-        vertex_count=len(vertices),
-        face_count=len(faces),
-        watertight=_as_bool(meta.get("watertight")),
-        connected_components=_as_int(meta.get("connected_components")),
+        clamp_reach_mm=clamp_reach,
+        vertex_count=stats["vertex_count"],
+        face_count=stats["face_count"],
+        watertight=watertight if watertight is not None else stats["watertight"],
+        connected_components=components if components is not None else stats["connected_components"],
         bbox_min_mm=bbox_min,
         bbox_max_mm=bbox_max,
         is_mock=False,
         provenance=PROVENANCE,
+        candidate_name=name,
+        task=task,
+        dimensions=numeric,
+        frame="candidate_mesh_frame",
     )
+
+
+def parse_all_numeric(text: str) -> Dict[str, float]:
+    """Every `label: number` line (bullets and `Z=100.0` tolerated) keyed by normalized label."""
+    values: Dict[str, float] = {}
+    for raw in text.splitlines():
+        line = raw.strip().lstrip("-•* ").strip()
+        if not line or ":" not in line:
+            continue
+        label, rest = line.split(":", 1)
+        key = re.sub(r"[^a-z0-9]+", "_", label.strip().lower()).strip("_")
+        if not key:
+            continue
+        match = _RANGE_RE.search(rest)
+        if match and "range" in key:
+            values[key + "_min"] = float(match.group(1))
+            values[key + "_max"] = float(match.group(2))
+            continue
+        number = _NUMBER_RE.search(rest)
+        if number:
+            values[key] = float(number.group(1))
+    return values
 
 
 def parse_candidate_dimensions(text: str) -> Dict[str, object]:

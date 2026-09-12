@@ -46,6 +46,7 @@ from cursor_adapter import (
     resolve_param_values,
 )
 from orchestrator import Orchestrator
+from imported_candidate import CANDIDATES
 from providers import get_provider
 from tools.warmstart import generate_warm_start
 from reasoning import set_reasoning_provider
@@ -160,14 +161,49 @@ def _warm_start_generator():
     return _generate
 
 
+def _candidate_name() -> str:
+    name = st.session_state.get("candidate_name", "cupholder")
+    return name if name in CANDIDATES else "cupholder"
+
+
 def _new_orchestrator() -> Orchestrator:
     mode = effective_geometry_mode(st.session_state.get("mode_geom"))
     return Orchestrator(
         fixtures=fixtures_for_geometry_mode(mode, topology_live=_topology_live()),
-        imported_candidate=imported_candidate_for_mode(mode),
+        imported_candidate=imported_candidate_for_mode(mode, _candidate_name()),
         topology_options=_topology_options(),
         warm_start_generator=_warm_start_generator(),
     )
+
+
+HOOK_CASE_MESSAGE = "I want a hook clamped under my desk edge to hang a 5 kg bag about 100 mm out from the edge."
+SHELF_CASE_MESSAGE = "I want a small shelf that lifts my stapler 100 mm above the desk with a flat top."
+HOOK_CASE_ANSWERS = {
+    "filled_bottle_mass_kg": 5.0,
+    "bottle_diameter_mm": 30.0,
+    "bottle_height_mm": 300.0,
+    "desk_thickness_mm": 20.0,
+    "attachment_method": "clamp",
+    "allowed_contact_region": "desk_front_edge",
+    "attachment_notes": "clamp only, no drilling",
+    "max_protrusion_mm": 110.0,
+    "manufacturing_method": "3d_print",
+    "material": "PLA",
+    "max_part_mass_kg": 0.3,
+}
+SHELF_CASE_ANSWERS = {
+    "filled_bottle_mass_kg": 0.5,
+    "bottle_diameter_mm": 60.0,
+    "bottle_height_mm": 40.0,
+    "desk_thickness_mm": 20.0,
+    "attachment_method": "free_standing",
+    "allowed_contact_region": "desk_top",
+    "attachment_notes": "stands on the desk, no fasteners",
+    "max_protrusion_mm": 120.0,
+    "manufacturing_method": "3d_print",
+    "material": "PLA",
+    "max_part_mass_kg": 0.4,
+}
 
 
 def apply_pending_request_prefill(store: Dict[str, Any]) -> None:
@@ -384,6 +420,24 @@ def _on_missing_info() -> None:
     _reset(ingest_message=MISSING_INFO_MESSAGE, prefill_happy=False)
 
 
+def _load_live_case(candidate: str, message: str, answers: Dict[str, Any]) -> None:
+    """Preset: imported candidate + live topology, request and answers prefilled."""
+    st.session_state.mode_geom = GEOM_IMPORTED
+    st.session_state.candidate_name = candidate
+    st.session_state.mode_topo = "Live"
+    _queue_request_text(message)
+    _reset(ingest_message=message, prefill_happy=False)
+    st.session_state.answers = dict(answers)
+
+
+def _on_hook_case() -> None:
+    _load_live_case("desk_bag_hook", HOOK_CASE_MESSAGE, HOOK_CASE_ANSWERS)
+
+
+def _on_shelf_case() -> None:
+    _load_live_case("stapler_shelf", SHELF_CASE_MESSAGE, SHELF_CASE_ANSWERS)
+
+
 def _on_rejected() -> None:
     _queue_request_text(REJECTED_MESSAGE)
     _reset(ingest_message=REJECTED_MESSAGE, prefill_happy=False)
@@ -418,7 +472,7 @@ def _sync_orch_fixtures() -> None:
         return
     mode = st.session_state.get("mode_geom")
     orch.fixtures = fixtures_for_geometry_mode(mode, topology_live=_topology_live())
-    orch.imported_candidate = imported_candidate_for_mode(mode)
+    orch.imported_candidate = imported_candidate_for_mode(mode, _candidate_name())
     orch.topology_options = _topology_options()
     orch.warm_start_generator = _warm_start_generator()
 
@@ -1020,6 +1074,18 @@ with st.sidebar:
         on_click=_on_rejected,
     )
     st.button(
+        "Load Desk Hook Case (live TO)",
+        use_container_width=True,
+        on_click=_on_hook_case,
+        help="Imported desk bag hook candidate (5 kg) with live topology optimization.",
+    )
+    st.button(
+        "Load Stapler Shelf Case (live TO)",
+        use_container_width=True,
+        on_click=_on_shelf_case,
+        help="Imported stapler shelf candidate with live topology optimization.",
+    )
+    st.button(
         "Reset session",
         use_container_width=True,
         on_click=_on_reset_session,
@@ -1055,7 +1121,15 @@ with st.sidebar:
         )
     elif st.session_state.mode_geom == GEOM_IMPORTED:
         st.caption(geometry_provenance_text(GEOM_IMPORTED))
-        st.caption("Uses cupholder_dimensions.txt, cupholder_single_piece_PLA.obj, and cupholder_surface_particles.obj.")
+        st.selectbox(
+            "Candidate",
+            list(CANDIDATES),
+            key="candidate_name",
+            format_func=lambda n: CANDIDATES[n].label or n,
+            help="Each candidate is an STL/OBJ + _dimensions.txt + _particles.obj triple.",
+        )
+        _files = CANDIDATES[_candidate_name()]
+        st.caption(f"{_files.mesh} · {_files.dimensions} · {_files.particles}")
     elif st.session_state.mode_geom == GEOM_GENERATED:
         st.caption(geometry_provenance_text(GEOM_GENERATED))
         _grok = get_provider("grok")
