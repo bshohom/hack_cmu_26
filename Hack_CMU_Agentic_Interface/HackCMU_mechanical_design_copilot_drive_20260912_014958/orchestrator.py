@@ -19,7 +19,7 @@ from agents.geometry import GeometryAgent
 from agents.interaction import InteractionAgent
 from agents.structure import StructureAgent
 from reasoning import run_reasoning_agent
-from imported_candidate import candidate_fit_questions, check_candidate_fit
+from imported_candidate import candidate_fit_questions, check_candidate_fit, fit_family_for
 from schemas import (
     AnalysisInput,
     AnalysisOutput,
@@ -311,7 +311,7 @@ class Orchestrator:
         if result.fits:
             self.state.stage = WorkflowStage.FEASIBILITY_CHECK
             return
-        questions = candidate_fit_questions(result)
+        questions = candidate_fit_questions(result, family=fit_family_for(candidate))
         self.state.stage = WorkflowStage.REQUEST_INFORMATION
         self.state.interaction_decision = InteractionDecision.REQUEST_INFORMATION
         self.state.clarifications = questions

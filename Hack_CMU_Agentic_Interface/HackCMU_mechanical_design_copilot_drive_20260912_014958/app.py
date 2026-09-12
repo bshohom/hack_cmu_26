@@ -1083,40 +1083,45 @@ def _render_candidate_panel(candidate, fit) -> None:
     mesh_cols[2].metric("Watertight", "yes" if candidate.watertight else "no")
     mesh_cols[3].metric("Components", candidate.connected_components or "n/a")
     st.markdown("**Key dimensions**")
-    st.write(
-        {
-            "inner diameter (mm)": candidate.inner_diameter_mm,
-            "outer diameter (mm)": candidate.outer_diameter_mm,
-            "holder height (mm)": candidate.holder_height_mm,
-            "desk compatibility (mm)": (
-                [candidate.compatible_desk_min_mm, candidate.compatible_desk_max_mm]
-                if candidate.compatible_desk_min_mm is not None
-                else None
-            ),
-        }
-    )
+    dims = {
+        "task": candidate.task,
+        "desk compatibility (mm)": (
+            [candidate.compatible_desk_min_mm, candidate.compatible_desk_max_mm]
+            if candidate.compatible_desk_min_mm is not None
+            else None
+        ),
+    }
+    if candidate.inner_diameter_mm is not None:
+        dims["inner diameter (mm)"] = candidate.inner_diameter_mm
+        dims["outer diameter (mm)"] = candidate.outer_diameter_mm
+        dims["holder height (mm)"] = candidate.holder_height_mm
+    if candidate.dimensions:
+        for key in (
+            "hook_opening",
+            "desk_face_to_hook_centerline",
+            "nominal_concept_target_load",
+            "clamp_internal_gap",
+            "platform_length",
+            "platform_width",
+            "lift_height",
+        ):
+            if key in candidate.dimensions:
+                dims[key] = candidate.dimensions[key]
+    if candidate.clamp_reach_mm is not None:
+        dims["reach / protrusion (mm)"] = candidate.clamp_reach_mm
+    st.write(dims)
     st.markdown("**Fit against requirements**")
     if fit is None:
         st.caption("Run Continue design after entering requirements to compute fit.")
         return
-    by_name = {check.name: check for check in fit.checks}
 
-    def _status(name: str) -> str:
-        check = by_name.get(name)
-        if check is None:
-            return "N/A"
+    def _status(check) -> str:
         if check.status.value == "n/a":
             return "N/A"
         return check.status.value.upper()
 
-    st.write(
-        {
-            "payload fit": _status("payload_fit"),
-            "desk fit": _status("desk_fit"),
-            "envelope fit": _status("envelope_fit"),
-            "overall": "PASS" if fit.fits else "FAIL",
-        }
-    )
+    st.write({check.name.replace("_", " "): _status(check) for check in fit.checks})
+    st.write({"overall": "PASS" if fit.fits else "FAIL"})
 
 
 def _render_scene_observation(observation: SceneObservation, meta: Dict[str, Any]) -> None:
@@ -1517,7 +1522,7 @@ with st.sidebar:
     if st.session_state.get("mode_topo") == "Live":
         with st.expander("Topology settings", expanded=False):
             st.number_input("Element size (mm)", min_value=2.0, max_value=10.0, value=4.0, step=0.5, key="topo_elem")
-            st.number_input("Max iterations", min_value=5, max_value=120, value=40, step=5, key="topo_iters")
+            st.number_input("Max iterations", min_value=2, max_value=120, value=40, step=1, key="topo_iters")
             st.number_input("Time budget (s)", min_value=30, max_value=900, value=150, step=30, key="topo_budget")
         st.caption(
             "No candidate mesh is needed: without one the part is designed from the requirements, "

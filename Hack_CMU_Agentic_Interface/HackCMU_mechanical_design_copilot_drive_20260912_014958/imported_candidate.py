@@ -289,126 +289,240 @@ def bounding_box(
     return (min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs))
 
 
-def check_candidate_fit(
-    requirements: UserRequirements,
-    candidate: ImportedCandidateGeometry,
-) -> CandidateFitResult:
-    checks: List[CandidateFitCheck] = []
+def _dim(candidate: ImportedCandidateGeometry, *keys: str) -> Optional[float]:
+    """A declared numeric line from the candidate dimensions file. Not invented."""
+    dims = candidate.dimensions or {}
+    for key in keys:
+        value = dims.get(key)
+        if value is not None:
+            return float(value)
+    return None
 
-    payload = requirements.object_geometry.bottle_diameter_mm
-    inner = candidate.inner_diameter_mm
-    if payload is None or inner is None:
-        checks.append(
-            CandidateFitCheck(
-                name="payload_fit",
-                status=CandidateFitStatus.NA,
-                required_mm=payload,
-                available_mm=inner,
-                message="Payload or holder inner diameter is unavailable; value was not invented.",
-            )
-        )
-    elif payload <= inner:
-        checks.append(
-            CandidateFitCheck(
-                name="payload_fit",
-                status=CandidateFitStatus.PASS,
-                required_mm=payload,
-                available_mm=inner,
-                message="Payload fits holder opening.",
-            )
-        )
-    else:
-        checks.append(
-            CandidateFitCheck(
-                name="payload_fit",
-                status=CandidateFitStatus.FAIL,
-                required_mm=payload,
-                available_mm=inner,
-                message="Payload does not fit holder opening.",
-            )
-        )
 
+def _payload_size_mm(requirements: UserRequirements) -> Optional[float]:
+    return requirements.object_geometry.bottle_diameter_mm
+
+
+def _payload_mass_kg(requirements: UserRequirements) -> Optional[float]:
+    return requirements.payload.filled_mass_kg or requirements.object_geometry.filled_mass_kg
+
+
+def _platform_min_mm(candidate: ImportedCandidateGeometry) -> Optional[float]:
+    length = _dim(candidate, "platform_length")
+    width = _dim(candidate, "platform_width")
+    if length is None or width is None:
+        return None
+    return min(length, width)
+
+
+def _hook_opening_mm(candidate: ImportedCandidateGeometry) -> Optional[float]:
+    """Measured strap opening on the hook arm. Never inner_diameter."""
+    return _dim(candidate, "hook_opening")
+
+
+def _hook_reach_mm(candidate: ImportedCandidateGeometry) -> Optional[float]:
+    if candidate.clamp_reach_mm is not None:
+        return float(candidate.clamp_reach_mm)
+    return _dim(candidate, "desk_face_to_hook_centerline")
+
+
+def _shelf_reach_mm(candidate: ImportedCandidateGeometry) -> Optional[float]:
+    declared = _dim(candidate, "platform_length")
+    if declared is not None:
+        return declared
+    if candidate.bbox_min_mm is not None and candidate.bbox_max_mm is not None:
+        return float(candidate.bbox_max_mm[0] - candidate.bbox_min_mm[0])
+    return None
+
+
+def _leq_check(
+    name: str,
+    required: Optional[float],
+    available: Optional[float],
+    *,
+    pass_msg: str,
+    fail_msg: str,
+    unknown_msg: str,
+    invert: bool = False,
+) -> CandidateFitCheck:
+    """PASS when required <= available, unless invert (then available <= required)."""
+    if required is None or available is None:
+        return CandidateFitCheck(
+            name=name,
+            status=CandidateFitStatus.NA,
+            required_mm=required,
+            available_mm=available,
+            message=unknown_msg,
+        )
+    ok = (available <= required) if invert else (required <= available)
+    return CandidateFitCheck(
+        name=name,
+        status=CandidateFitStatus.PASS if ok else CandidateFitStatus.FAIL,
+        required_mm=required,
+        available_mm=available,
+        message=pass_msg if ok else fail_msg,
+    )
+
+
+def _desk_check(requirements: UserRequirements, candidate: ImportedCandidateGeometry) -> CandidateFitCheck:
     desk = requirements.environment.desk_thickness_mm
     desk_min = candidate.compatible_desk_min_mm
     desk_max = candidate.compatible_desk_max_mm
     if desk is None or desk_min is None or desk_max is None:
-        checks.append(
-            CandidateFitCheck(
-                name="desk_fit",
-                status=CandidateFitStatus.NA,
-                desk_mm=desk,
-                supported_range_mm=(
-                    (desk_min, desk_max) if desk_min is not None and desk_max is not None else None
-                ),
-                message="Desk thickness or candidate desk range is unavailable; value was not invented.",
-            )
+        return CandidateFitCheck(
+            name="desk_fit",
+            status=CandidateFitStatus.NA,
+            desk_mm=desk,
+            supported_range_mm=(
+                (desk_min, desk_max) if desk_min is not None and desk_max is not None else None
+            ),
+            message="Desk thickness or candidate desk range is unavailable; value was not invented.",
         )
-    elif desk_min <= desk <= desk_max:
-        checks.append(
-            CandidateFitCheck(
-                name="desk_fit",
-                status=CandidateFitStatus.PASS,
-                desk_mm=desk,
-                supported_range_mm=(desk_min, desk_max),
-                message="Desk thickness is inside the candidate clamp range.",
-            )
+    if desk_min <= desk <= desk_max:
+        return CandidateFitCheck(
+            name="desk_fit",
+            status=CandidateFitStatus.PASS,
+            desk_mm=desk,
+            supported_range_mm=(desk_min, desk_max),
+            message="Desk thickness is inside the candidate clamp range.",
         )
-    else:
-        checks.append(
-            CandidateFitCheck(
-                name="desk_fit",
-                status=CandidateFitStatus.FAIL,
-                desk_mm=desk,
-                supported_range_mm=(desk_min, desk_max),
-                message="Desk thickness is outside the candidate clamp range.",
-            )
-        )
+    return CandidateFitCheck(
+        name="desk_fit",
+        status=CandidateFitStatus.FAIL,
+        desk_mm=desk,
+        supported_range_mm=(desk_min, desk_max),
+        message="Desk thickness is outside the candidate clamp range.",
+    )
 
-    protrusion = requirements.design_envelope.max_protrusion_mm
-    reach = candidate.clamp_reach_mm
-    if protrusion is None or reach is None:
-        checks.append(
-            CandidateFitCheck(
-                name="envelope_fit",
-                status=CandidateFitStatus.NA,
-                required_mm=protrusion,
-                available_mm=reach,
-                message="Envelope or clamp reach is unavailable; value was not invented.",
-            )
-        )
-    elif reach <= protrusion:
-        checks.append(
-            CandidateFitCheck(
-                name="envelope_fit",
-                status=CandidateFitStatus.PASS,
-                required_mm=protrusion,
-                available_mm=reach,
-                message="Candidate clamp reach is within the design envelope.",
-            )
-        )
-    else:
-        checks.append(
-            CandidateFitCheck(
-                name="envelope_fit",
-                status=CandidateFitStatus.FAIL,
-                required_mm=protrusion,
-                available_mm=reach,
-                message="Candidate clamp reach exceeds the allowed design envelope.",
-            )
-        )
+
+def _cupholder_checks(
+    requirements: UserRequirements, candidate: ImportedCandidateGeometry
+) -> List[CandidateFitCheck]:
+    payload = _payload_size_mm(requirements)
+    inner = candidate.inner_diameter_mm
+    return [
+        _leq_check(
+            "payload_fit",
+            payload,
+            inner,
+            pass_msg="Payload fits holder opening.",
+            fail_msg="Payload does not fit holder opening.",
+            unknown_msg="Payload or holder inner diameter is unavailable; value was not invented.",
+        ),
+        _desk_check(requirements, candidate),
+        _leq_check(
+            "envelope_fit",
+            requirements.design_envelope.max_protrusion_mm,
+            candidate.clamp_reach_mm,
+            invert=True,
+            pass_msg="Candidate clamp reach is within the design envelope.",
+            fail_msg="Candidate clamp reach exceeds the allowed design envelope.",
+            unknown_msg="Envelope or clamp reach is unavailable; value was not invented.",
+        ),
+    ]
+
+
+def _hook_checks(
+    requirements: UserRequirements, candidate: ImportedCandidateGeometry
+) -> List[CandidateFitCheck]:
+    """Strap hook: opening, clamp range, outward reach, declared load rating. No inner_diameter."""
+    return [
+        _leq_check(
+            "payload_fit",
+            _payload_size_mm(requirements),
+            _hook_opening_mm(candidate),
+            pass_msg="Strap / handle width fits the measured hook opening.",
+            fail_msg="Strap / handle width does not fit the measured hook opening.",
+            unknown_msg=(
+                "Strap width or the candidate's measured hook opening is unavailable; "
+                "value was not invented. Holder inner diameter is not a hook metric."
+            ),
+        ),
+        _desk_check(requirements, candidate),
+        _leq_check(
+            "envelope_fit",
+            requirements.design_envelope.max_protrusion_mm,
+            _hook_reach_mm(candidate),
+            invert=True,
+            pass_msg="Hook outward reach is within the allowed protrusion.",
+            fail_msg="Hook outward reach exceeds the allowed design envelope.",
+            unknown_msg="Envelope or hook reach is unavailable; value was not invented.",
+        ),
+        _leq_check(
+            "load_rating",
+            _payload_mass_kg(requirements),
+            _dim(candidate, "nominal_concept_target_load"),
+            pass_msg="Payload mass is within the candidate's declared concept load rating.",
+            fail_msg="Payload mass exceeds the candidate's declared concept load rating.",
+            unknown_msg=(
+                "Payload mass or the candidate's declared concept load rating is unavailable; "
+                "value was not invented."
+            ),
+        ),
+    ]
+
+
+def _shelf_checks(
+    requirements: UserRequirements, candidate: ImportedCandidateGeometry
+) -> List[CandidateFitCheck]:
+    """Shelf: payload footprint vs platform, envelope vs declared platform length. No cup diameter."""
+    return [
+        _leq_check(
+            "payload_fit",
+            _payload_size_mm(requirements),
+            _platform_min_mm(candidate),
+            pass_msg="Payload footprint fits the declared platform.",
+            fail_msg="Payload footprint does not fit the declared platform.",
+            unknown_msg=(
+                "Payload footprint or the candidate's platform length/width is unavailable; "
+                "value was not invented. Holder inner diameter is not a shelf metric."
+            ),
+        ),
+        _leq_check(
+            "envelope_fit",
+            requirements.design_envelope.max_protrusion_mm,
+            _shelf_reach_mm(candidate),
+            invert=True,
+            pass_msg="Platform length is within the allowed envelope.",
+            fail_msg="Platform length exceeds the allowed design envelope.",
+            unknown_msg="Envelope or platform length is unavailable; value was not invented.",
+        ),
+    ]
+
+
+_FIT_FAMILIES = {
+    "cupholder": _cupholder_checks,
+    "desk_bag_hook": _hook_checks,
+    "stapler_shelf": _shelf_checks,
+}
+
+
+def fit_family_for(candidate: ImportedCandidateGeometry) -> str:
+    """Which declared check family this candidate uses. Task/name, not UI branching."""
+    task = (candidate.task or candidate.candidate_name or "").strip().lower()
+    if task in _FIT_FAMILIES:
+        return task
+    return "cupholder"
+
+
+def check_candidate_fit(
+    requirements: UserRequirements,
+    candidate: ImportedCandidateGeometry,
+) -> CandidateFitResult:
+    family = fit_family_for(candidate)
+    checks = _FIT_FAMILIES[family](requirements, candidate)
 
     failed = [check for check in checks if check.status == CandidateFitStatus.FAIL]
     unknown = [check for check in checks if check.status == CandidateFitStatus.NA]
-    # "No failed checks" is not the same as "checks passed". A candidate whose three checks
+    # "No failed checks" is not the same as "checks passed". A candidate whose checks
     # all returned n/a used to report that it fits the resolved requirements, having
     # verified nothing at all.
     fits = bool(checks) and not failed and not unknown
     if fits:
         message = (
             "Imported candidate geometry passes the checks that could be run "
-            f"({', '.join(c.name for c in checks)}). These cover payload diameter, desk "
-            "clamp range and protrusion only; retention, usability and assembly clearance "
-            "are not checked."
+            f"({', '.join(c.name for c in checks)}). These cover the {family} fit "
+            "metrics only; usability and assembly clearance are not checked."
         )
     elif failed:
         details = "; ".join(check.message for check in failed if check.message)
@@ -422,63 +536,84 @@ def check_candidate_fit(
     return CandidateFitResult(fits=fits, checks=checks, message=message)
 
 
-def candidate_fit_questions(result: CandidateFitResult) -> List[ClarificationQuestion]:
-    questions: List[ClarificationQuestion] = []
-    by_name = {check.name: check for check in result.checks}
-    payload = by_name.get("payload_fit")
-    if payload is not None and payload.status == CandidateFitStatus.FAIL:
-        questions.append(
-            ClarificationQuestion(
-                field="bottle_diameter_mm",
-                question="Payload does not fit holder opening. Revise payload diameter or use a different candidate.",
-                priority="high",
-            )
-        )
-    desk = by_name.get("desk_fit")
-    if desk is not None and desk.status == CandidateFitStatus.FAIL:
-        questions.append(
-            ClarificationQuestion(
-                field="desk_thickness_mm",
-                question="Desk thickness is outside the imported candidate clamp range. Revise desk thickness or use a different candidate.",
-                priority="high",
-            )
-        )
-    envelope = by_name.get("envelope_fit")
-    if envelope is not None and envelope.status == CandidateFitStatus.FAIL:
-        questions.append(
-            ClarificationQuestion(
-                field="max_protrusion_mm",
-                question="Candidate clamp reach exceeds the allowed protrusion. Revise the design envelope or use a different candidate.",
-                priority="high",
-            )
-        )
-    # An n/a check blocks acceptance, so it has to be answerable: ask for the missing
-    # number instead of leaving the run stuck behind a check that can never resolve.
-    _UNKNOWN_PROMPTS = {
+# Per-check clarification copy. Hook/shelf must not ask for holder inner diameter.
+_FIT_QUESTIONS: Dict[str, Dict[str, Tuple[str, str, str]]] = {
+    "cupholder": {
         "payload_fit": (
             "bottle_diameter_mm",
+            "Payload does not fit holder opening. Revise payload diameter or use a different candidate.",
             "Payload fit could not be checked: the payload diameter or the candidate's "
             "inner diameter is unknown. Give the payload diameter in mm.",
         ),
         "desk_fit": (
             "desk_thickness_mm",
+            "Desk thickness is outside the imported candidate clamp range. Revise desk thickness or use a different candidate.",
             "Desk fit could not be checked: the desk thickness or the candidate's supported "
             "clamp range is unknown. Give the desk thickness in mm.",
         ),
         "envelope_fit": (
             "max_protrusion_mm",
+            "Candidate clamp reach exceeds the allowed protrusion. Revise the design envelope or use a different candidate.",
             "Envelope fit could not be checked: the allowed protrusion or the candidate's "
             "clamp reach is unknown. Give the maximum protrusion in mm.",
         ),
-    }
+    },
+    "desk_bag_hook": {
+        "payload_fit": (
+            "bottle_diameter_mm",
+            "Strap / handle width does not fit the measured hook opening. Revise the strap width or use a different candidate.",
+            "Strap fit could not be checked: the strap width or the candidate's measured "
+            "hook opening is unknown. Give the strap / handle width in mm.",
+        ),
+        "desk_fit": (
+            "desk_thickness_mm",
+            "Desk thickness is outside the imported candidate clamp range. Revise desk thickness or use a different candidate.",
+            "Desk fit could not be checked: the desk thickness or the candidate's supported "
+            "clamp range is unknown. Give the desk thickness in mm.",
+        ),
+        "envelope_fit": (
+            "max_protrusion_mm",
+            "Hook reach exceeds the allowed protrusion. Revise the design envelope or use a different candidate.",
+            "Envelope fit could not be checked: the allowed protrusion or the hook reach "
+            "is unknown. Give the maximum protrusion in mm.",
+        ),
+        "load_rating": (
+            "filled_bottle_mass_kg",
+            "Payload mass exceeds the candidate's declared concept load rating. Revise the payload mass or use a different candidate.",
+            "Load rating could not be checked: the payload mass or the candidate's declared "
+            "concept load is unknown. Give the payload mass in kg.",
+        ),
+    },
+    "stapler_shelf": {
+        "payload_fit": (
+            "bottle_diameter_mm",
+            "Payload footprint does not fit the declared platform. Revise the footprint or use a different candidate.",
+            "Platform fit could not be checked: the payload footprint or the candidate's "
+            "platform size is unknown. Give the payload footprint width in mm.",
+        ),
+        "envelope_fit": (
+            "max_protrusion_mm",
+            "Platform length exceeds the allowed envelope. Revise the design envelope or use a different candidate.",
+            "Envelope fit could not be checked: the allowed envelope or the platform length "
+            "is unknown. Give the maximum protrusion in mm.",
+        ),
+    },
+}
+
+
+def candidate_fit_questions(result: CandidateFitResult, family: str = "cupholder") -> List[ClarificationQuestion]:
+    questions: List[ClarificationQuestion] = []
+    by_name = {check.name: check for check in result.checks}
+    prompts = _FIT_QUESTIONS.get(family) or _FIT_QUESTIONS["cupholder"]
     for name, check in by_name.items():
-        if check.status != CandidateFitStatus.NA:
+        prompt = prompts.get(name)
+        if prompt is None:
             continue
-        prompt = _UNKNOWN_PROMPTS.get(name)
-        if prompt is not None:
-            questions.append(
-                ClarificationQuestion(field=prompt[0], question=prompt[1], priority="high")
-            )
+        field, fail_q, unknown_q = prompt
+        if check.status == CandidateFitStatus.FAIL:
+            questions.append(ClarificationQuestion(field=field, question=fail_q, priority="high"))
+        elif check.status == CandidateFitStatus.NA:
+            questions.append(ClarificationQuestion(field=field, question=unknown_q, priority="high"))
 
     if not questions:
         questions.append(
