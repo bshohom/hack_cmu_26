@@ -49,8 +49,14 @@ from cursor_adapter import (
 from orchestrator import Orchestrator
 from imported_candidate import CANDIDATES
 from providers import get_provider
+from reasoning import (
+    clear_reasoning_traces,
+    reasoning_traces,
+    set_reasoning_mode,
+    set_reasoning_provider,
+)
+from reasoning_contracts import ReasoningMode, ReasoningOutcome
 from tools.warmstart import generate_warm_start
-from reasoning import set_reasoning_provider
 from schemas import (
     InteractionResult,
     MassProvenance,
@@ -263,6 +269,11 @@ REASONING_CHOICES = ["Mock", "K2 Horizon", "Grok", "Cursor"]
 
 
 def _default_reasoning_choice() -> str:
+    """Grok drives the engineering reasoning by default; any structured provider can replace it."""
+    if get_provider("grok").configured:
+        return "Grok"
+    if get_provider("k2_horizon").configured:
+        return "K2 Horizon"
     return "Cursor" if is_cursor_configured() else "Mock"
 
 
@@ -344,6 +355,7 @@ def _reset(
     To change the design-request text box, set `request_prefill` and rerun.
     `_apply_pending_prefills` copies it into `request_text` before the widget.
     """
+    clear_reasoning_traces()
     st.session_state.orch = _new_orchestrator()
     st.session_state.chat = []
     st.session_state.answers = {}
@@ -569,6 +581,46 @@ def _continue_design() -> None:
             )
         else:
             _append("assistant", _run_summary(orch.state))
+
+
+def _render_reasoning_traces() -> None:
+    """Show what the reasoning model was asked, what it returned, and why it was rejected."""
+    traces = reasoning_traces()
+    if not traces:
+        return
+    failed = [t for t in traces if t.outcome is not ReasoningOutcome.LIVE]
+    blocked = [t for t in traces if t.outcome is ReasoningOutcome.BLOCKED]
+    st.markdown("**Reasoning**")
+    if blocked:
+        st.error(
+            f"{len(blocked)} reasoning call(s) BLOCKED in developer mode. The workflow stopped "
+            "rather than falling back to the deterministic tables."
+        )
+    elif failed:
+        st.warning(
+            f"{len(failed)} reasoning call(s) fell back to the deterministic tables — those "
+            "decisions are overfit to the demo problems, not reasoned."
+        )
+    for t in traces:
+        icon = {"live": "✅", "fallback": "⚠️", "blocked": "⛔"}[t.outcome.value]
+        with st.expander(f"{icon} {t.summary()}", expanded=bool(blocked) and t in blocked):
+            st.write({
+                "task": t.task.value, "mode": t.mode.value, "provider": t.provider,
+                "model": t.model, "outcome": t.outcome.value,
+                "latency_s": round(t.total_latency_s, 1), "attempts": len(t.attempts),
+            })
+            if t.reason:
+                st.caption(t.reason)
+            for a in t.attempts:
+                label = "accepted" if a.ok else f"rejected — {a.failure_kind.value if a.failure_kind else 'unknown'}"
+                st.markdown(f"*attempt {a.attempt}: {label} ({a.latency_s:.1f}s)*")
+                if a.error:
+                    st.code(a.error, language="text")
+                if a.raw_excerpt and not a.ok:
+                    st.code(a.raw_excerpt, language="json")
+            if t.prompt_excerpt:
+                with st.expander("prompt sent", expanded=False):
+                    st.code(t.prompt_excerpt, language="text")
 
 
 def _run_with_progress(orch: Orchestrator) -> None:
@@ -797,6 +849,9 @@ def _sync_reasoning_provider(choice: str) -> None:
         "Cursor": "cursor",
     }
     set_reasoning_provider(get_provider(mapping[choice]))
+    set_reasoning_mode(
+        ReasoningMode.DEVELOPER if st.session_state.get("developer_mode") else ReasoningMode.PRODUCT
+    )
 
 
 def _cursor_catalog() -> Tuple[List[Dict[str, Any]], str]:
@@ -1264,9 +1319,25 @@ with st.sidebar:
         "Reasoning Provider",
         REASONING_CHOICES,
         key="mode_reason",
-        help="Cursor is used only for live image + requirement understanding. Workflow decisions stay in InteractionAgent.",
+        help="Drives the engineering reasoning: what to measure, scope/hazard, how the load is reacted. Any structured provider can replace Grok.",
+    )
+    st.checkbox(
+        "Developer mode (block on reasoning failure)",
+        key="developer_mode",
+        help="Product mode falls back to the deterministic tables when reasoning fails. "
+             "Developer mode refuses to fall back and shows the full reasoning trace instead, "
+             "so the gap can be fixed rather than hidden.",
     )
     _sync_reasoning_provider(reasoning_choice)
+    _provider_now = get_provider({"Mock": "mock", "K2 Horizon": "k2_horizon", "Grok": "grok", "Cursor": "cursor"}[reasoning_choice])
+    if not _provider_now.supports_structured():
+        st.warning(
+            f"{reasoning_choice} cannot answer structured reasoning calls"
+            + (f": {_provider_now.not_connected_reason}" if _provider_now.not_connected_reason else "")
+            + ". Engineering decisions will use the deterministic tables."
+        )
+    elif st.session_state.get("developer_mode"):
+        st.caption("Developer mode: reasoning failures block and are reported in full below.")
     k2 = get_provider("k2_horizon")
     grok = get_provider("grok")
     cursor = get_provider("cursor")
@@ -1551,6 +1622,8 @@ with left:
         use_container_width=True,
         on_click=_on_continue_design,
     )
+
+    _render_reasoning_traces()
 
 with center:
     st.subheader("Design view")

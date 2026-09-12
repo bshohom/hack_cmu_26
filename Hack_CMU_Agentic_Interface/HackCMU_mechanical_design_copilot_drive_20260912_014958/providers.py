@@ -34,6 +34,7 @@ from schemas import (
     ReasoningEffort,
     ReasoningResult,
     ReasoningRole,
+    SceneObservation,
     StructureInput,
     StructureOutput,
 )
@@ -52,6 +53,21 @@ class ReasoningProvider(ABC):
     name: str = "base"
     configured: bool = False
     not_connected_reason: str = ""
+
+    def supports_structured(self) -> bool:
+        """True when this provider can answer schema-constrained reasoning calls.
+
+        These drive real engineering decisions (what to measure, how the load is reacted,
+        how to revise a failed check), so they are not tied to any one vendor.
+        """
+        return False
+
+    def structured_json(self, messages: List[Dict[str, Any]], timeout: int = 90) -> str:
+        """Raw assistant text for a multi-turn JSON conversation (see reasoning_harness)."""
+        raise NotImplementedError(f"{self.name} does not implement structured_json")
+
+    def supports_vision(self) -> bool:
+        return False
 
     @abstractmethod
     def complete(
@@ -126,12 +142,72 @@ class MockReasoningProvider(ReasoningProvider):
 
 
 class _OpenAICompatibleProvider(ReasoningProvider):
-    """Shared HTTPS JSON client for OpenAI-style chat completions."""
+    """Shared HTTPS JSON client for OpenAI-style chat completions.
+
+    Every provider on this transport (Grok, K2, any OpenAI-compatible endpoint) gets the
+    structured reasoning calls and image understanding, so live reasoning is not the
+    privilege of one vendor's SDK.
+    """
 
     def __init__(self) -> None:
         self._reasoning_by_content: Dict[str, str] = {}
 
-    def _chat(self, messages: List[Dict[str, Any]], timeout: int = 60) -> str:
+    def supports_structured(self) -> bool:
+        return bool(self.configured)
+
+    def structured_json(self, messages: List[Dict[str, Any]], timeout: int = 90) -> str:
+        return self._chat(self._messages_with_reasoning(messages), timeout=timeout)
+
+    def supports_vision(self) -> bool:
+        return bool(self.configured)
+
+    def observe_scene(
+        self,
+        image_bytes: bytes,
+        user_text: str,
+        model_id: str = "",
+        image_name: Optional[str] = None,
+        model_params: Optional[Dict[str, str]] = None,
+        catalog: Optional[List[Dict[str, Any]]] = None,
+    ) -> SceneCallResult:
+        """Image + text -> SceneObservation, via OpenAI-style image content parts."""
+        import base64
+
+        from cursor_adapter import SCENE_TASK_INSTRUCTION
+
+        if not self.configured:
+            return SceneCallResult(error=self.not_connected_reason, model_id=model_id or self.model,
+                                   params=dict(model_params or {}))
+        started = time.perf_counter()
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        messages = [
+            {"role": "system", "content": "Reply with JSON only. Match the requested schema."},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"{SCENE_TASK_INSTRUCTION}\n\nUser request: {user_text}"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}},
+                ],
+            },
+        ]
+        try:
+            content = self._chat(messages, timeout=120)
+            observation = SceneObservation.model_validate(json.loads(content))
+            observation.source = f"{self.name}_live"
+            return SceneCallResult(observation=observation, model_id=model_id or self.model,
+                                   params=dict(model_params or {}), latency_s=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001 — a model without vision fails here
+            return SceneCallResult(
+                error=(
+                    f"{self.name} scene observation failed ({type(exc).__name__}: {exc}). "
+                    f"Model {self.model!r} may not accept images; set a vision-capable model."
+                ),
+                model_id=model_id or self.model,
+                params=dict(model_params or {}),
+                latency_s=time.perf_counter() - started,
+            )
+
+    def _chat(self, messages: List[Dict[str, Any]], timeout: int = 90) -> str:
         payload: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -163,7 +239,7 @@ class _OpenAICompatibleProvider(ReasoningProvider):
             item = dict(message)
             if item.get("role") == "assistant" and "reasoning" not in item:
                 content = item.get("content") or ""
-                item["reasoning"] = self._reasoning_by_content.get(content, " ")
+                item["reasoning"] = self._reasoning_by_content.get(content if isinstance(content, str) else "", " ")
             prepared.append(item)
         return prepared
 
