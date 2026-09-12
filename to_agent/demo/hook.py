@@ -82,6 +82,59 @@ def measure_hook(points: np.ndarray, dims: dict) -> HookGeometry:
     )
 
 
+def desk_edge_to_mesh_transform(geometry: HookGeometry) -> list[list[float]]:
+    """4x4 taking desk_edge_frame points into this mesh's candidate_mesh_frame.
+
+    Both frames already share axes and units (mm, +X off the desk, +Y along the
+    edge, +Z up). The mesh origin is the print/scan origin. The generator measures
+    two named planes that desk_edge_frame defines as x=0 and z=0:
+
+    - desk front edge  -> x = geometry.x_back_in
+    - desk underside   -> z = geometry.z_rib_lo
+
+    The translation is those two plane offsets. It is not a fit to any load point.
+    """
+    return [
+        [1.0, 0.0, 0.0, float(geometry.x_back_in)],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, float(geometry.z_rib_lo)],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+
+
+def hook_registration(dims_path: str | Path, points_path: str | Path) -> dict:
+    """Canned-demo registration payload: transform + landmarks in both frames."""
+    geometry = measure_hook(load_point_cloud(points_path), parse_dimensions(dims_path))
+    matrix = desk_edge_to_mesh_transform(geometry)
+    tx, tz = float(geometry.x_back_in), float(geometry.z_rib_lo)
+
+    def to_desk(x: float, y: float, z: float) -> list[float]:
+        return [x - tx, y, z - tz]
+
+    seat_x = 0.5 * (geometry.x_seat[0] + geometry.x_seat[1])
+    named = {
+        "strap_seat": to_desk(seat_x, 0.0, geometry.z_seat),
+        "mount_contact": to_desk(
+            0.5 * (geometry.x_min + geometry.x_back_in),
+            0.0,
+            0.5 * (geometry.z_rib_lo + geometry.z_rib_hi),
+        ),
+    }
+    return {
+        "from_frame": "desk_edge_frame",
+        "to_frame": "candidate_mesh_frame",
+        "units": "mm",
+        "matrix": matrix,
+        "basis": (
+            "translation aligning the measured desk front-edge plane "
+            f"(x={tx:.4f}) and desk-underside plane (z={tz:.4f}) with "
+            "desk_edge_frame x=0 / z=0; axes already coincide"
+        ),
+        "landmarks_desk_edge_frame": named,
+        "named_regions": named,
+    }
+
+
 def build_hook_problem(
     dims_path: str | Path,
     points_path: str | Path,

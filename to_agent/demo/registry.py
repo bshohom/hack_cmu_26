@@ -40,3 +40,15 @@ def get_builder(task: str) -> Builder:
         return BUILDERS[task]
     except KeyError:
         raise KeyError(f"no problem builder for task {task!r}; known: {sorted(BUILDERS)}") from None
+
+
+def candidate_registration(task: str, dims_path: str | Path, points_path: str | Path) -> dict | None:
+    """Imported-demo measurement: plane transform + named features in desk_edge_frame.
+
+    Coordinates live in the part-specific demo module, not in the adapter or orchestrator.
+    """
+    if task == "desk_bag_hook":
+        from .hook import hook_registration
+
+        return hook_registration(dims_path, points_path)
+    return None

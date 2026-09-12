@@ -81,6 +81,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(structure.load_regions)
         self.assertTrue(structure.load_paths)
         self.assertTrue(structure.boundary_conditions)
+        self.assertEqual(structure.load_cases[0].region_name, structure.load_regions[0].name)
+        self.assertEqual(structure.load_regions[0].name, "cup_cavity")
 
         analysis = orch.state.analysis
         assert analysis is not None
