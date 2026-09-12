@@ -1,0 +1,22 @@
+grok_hook — generated warm start
+Units: mm
+
+DESIGN DIMENSIONS
+- Protrusion: 100.0
+- Clamp gap: 27.0
+- Hook arm length: 96.0
+- Total height below desk: 60.0
+
+NOTES
+- Hook for 5kg bag strap under desk edge.
+- Clamp gap 27mm for 25mm desk.
+- Horizontal arm 100mm out with raised tip.
+- All walls >=5mm for FDM PLA.
+
+MESH
+- Vertices: 54
+- Faces: 104
+- Watertight: True
+- Connected components: 1
+- Bounding box min: [-28.0, -12.5, -70.0]
+- Bounding box max: [100.0, 12.5, 54.0]

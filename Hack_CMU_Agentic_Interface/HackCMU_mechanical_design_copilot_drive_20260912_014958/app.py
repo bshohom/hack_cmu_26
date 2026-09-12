@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -277,9 +278,17 @@ def _geometry_mode_label(mode: str) -> str:
     return "Adaptive Synthetic Mock"
 
 
+def _default_geometry_mode() -> str:
+    """Generated warm start by default: it is built from the user's own measurements, so it
+    cannot contradict them the way a fixed imported STL does."""
+    return GEOM_GENERATED if get_provider("grok").configured else GEOM_ADAPTIVE
+
+
 def _init_session() -> None:
     if st.session_state.get("mode_geom") not in GEOM_MODE_OPTIONS:
-        st.session_state.mode_geom = GEOM_ADAPTIVE
+        st.session_state.mode_geom = _default_geometry_mode()
+    if st.session_state.get("mode_topo") not in ("Mock Fixture", "Live"):
+        st.session_state.mode_topo = "Live"
     if st.session_state.get("mode_reason") not in REASONING_CHOICES:
         st.session_state.mode_reason = _default_reasoning_choice()
     if "orch" not in st.session_state:
@@ -484,7 +493,7 @@ def _on_rejected() -> None:
 
 
 def _on_reset_session() -> None:
-    st.session_state.mode_geom = GEOM_ADAPTIVE
+    st.session_state.mode_geom = _default_geometry_mode()
     st.session_state.mode_reason = _default_reasoning_choice()
     _queue_request_text(HAPPY_PATH_MESSAGE)
     _reset(clear_image=True)
@@ -549,8 +558,7 @@ def _continue_design() -> None:
         WorkflowStage.DESIGN_REVIEW_FAILED,
     ):
         if _topology_live() or orch.warm_start_generator is not None:
-            with st.spinner("Running live stages (warm-start generation / topology optimization)…"):
-                orch.run()
+            _run_with_progress(orch)
         else:
             orch.run()
         if orch.state.contract_error:
@@ -561,6 +569,37 @@ def _continue_design() -> None:
             )
         else:
             _append("assistant", _run_summary(orch.state))
+
+
+def _run_with_progress(orch: Orchestrator) -> None:
+    """Run the live stages with a progress bar and a wall-time expectation."""
+    status = st.empty()
+    bar = st.progress(0.0)
+    started = time.monotonic()
+    state = {"total": None}
+
+    def on_progress(it: int, total: int, compliance: float) -> None:
+        state["total"] = total
+        elapsed = time.monotonic() - started
+        remaining = (elapsed / it) * (total - it) if it else 0.0
+        bar.progress(min(it / max(total, 1), 1.0))
+        status.caption(
+            f"Optimizing — iteration {it}/{total} · compliance {compliance:.4g} · "
+            f"{elapsed:.0f}s elapsed, ~{remaining:.0f}s remaining"
+        )
+
+    orch.topology_progress = on_progress
+    if orch.warm_start_generator is not None:
+        status.caption("Generating the warm-start mesh from your measurements…")
+    else:
+        status.caption("Preparing the optimization…")
+    try:
+        with st.spinner("Running live stages…"):
+            orch.run()
+    finally:
+        orch.topology_progress = None
+        bar.empty()
+        status.empty()
 
 
 def _format_answers(update: RequirementsUpdate) -> str:
@@ -1207,16 +1246,18 @@ with st.sidebar:
     st.radio(
         "Topology",
         ["Mock Fixture", "Live"],
-        index=0,
         key="mode_topo",
-        help="Live runs SIMP on torch-fem (to_agent) with the candidate mesh as warm start; needs an Imported or Generated geometry source.",
+        help="Live runs SIMP on torch-fem (to_agent). With a candidate mesh it is warm started from it; with none it designs from the requirements, warm started by the coarse structural members.",
     )
     if st.session_state.get("mode_topo") == "Live":
         with st.expander("Topology settings", expanded=False):
             st.number_input("Element size (mm)", min_value=2.0, max_value=10.0, value=4.0, step=0.5, key="topo_elem")
             st.number_input("Max iterations", min_value=5, max_value=120, value=40, step=5, key="topo_iters")
             st.number_input("Time budget (s)", min_value=30, max_value=900, value=150, step=30, key="topo_budget")
-        st.caption("Falls back to the mock (with the reason) if no candidate mesh exists or the run fails.")
+        st.caption(
+            "No candidate mesh is needed: without one the part is designed from the requirements, "
+            "warm started by the coarse structural members. The mock is used only if the run fails."
+        )
     else:
         st.caption("Mock fixture. Switch to Live for a real optimization.")
     reasoning_choice = st.radio(

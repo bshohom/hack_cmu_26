@@ -4,12 +4,12 @@ units:
   length: mm
   force: N
 material:
-  name: PLA
+  name: PLA (FDM printed)
   E_MPa: 2300.0
   nu: 0.35
   density_kg_m3: 1240.0
-  yield_MPa: 50.0
-  confidence: assumed
+  yield_MPa: 30.0
+  confidence: as-printed FDM values (XY modulus, Z-direction yield)
 design_domain:
   type: box
   min:
@@ -75,11 +75,11 @@ preserve:
     tol: 3.0
   - type: box
     min:
-    - 41.821185
+    - 36.821185
     - -11.0
     - 0.75
     max:
-    - 90.85
+    - 106.85
     - 11.0
     - 5.25
 void:
@@ -94,13 +94,13 @@ void:
   - 20.15
 - type: box
   min:
-  - 41.821185
+  - 36.821185
   - -13.0
   - 5.75
   max:
   - 91.85
   - 13.0
-  - 40.95
+  - 35.95
 supports:
 - id: top_jaw
   region:
@@ -139,11 +139,11 @@ load_cases:
   region:
     type: box
     min:
-    - 41.821185
+    - 36.821185
     - -10.0
     - 1.75
     max:
-    - 90.85
+    - 106.85
     - 10.0
     - 5.75
   force_N:
@@ -152,15 +152,32 @@ load_cases:
   - -49.050000000000004
   weight: 1.0
   confidence: assumed
+- id: tip_retention
+  region:
+    type: box
+    min:
+    - 91.85
+    - -10.0
+    - 1.75
+    max:
+    - 106.85
+    - 10.0
+    - 36.95
+  force_N:
+  - 19.62
+  - 0.0
+  - 0.0
+  weight: 1.0
+  confidence: assumed
 - id: side_swing
   region:
     type: box
     min:
-    - 41.821185
+    - 36.821185
     - -10.0
     - 1.75
     max:
-    - 90.85
+    - 106.85
     - 10.0
     - 5.75
   force_N:
@@ -181,5 +198,5 @@ change_tol: 0.01
 notes: 'Demo desk bag hook. Payload 5.0 kg (concept target). Clamp levels measured
   from the scan: HookGeometry(x_min=-59.75, x_max=106.85, x_back_in=-0.25, x_back_out=11.821185,
   z_bot_arm=(-9.95, 0.05000000000000071), z_top_arm=(22.049999999999997, 32.05), z_rib_lo=1.95,
-  z_rib_hi=20.15, z_seat=4.75, x_seat=(41.821185, 90.85), x_tip=(92.85, 106.85), z_tip_top=36.95,
-  half_w=25.0, hook_half_w=10.0, measured_gap=18.2).'
+  z_rib_hi=20.15, z_seat=4.75, x_seat=(36.821185, 106.85), x_tip=(92.85, 106.85),
+  z_tip_top=36.95, half_w=25.0, hook_half_w=10.0, measured_gap=18.2).'

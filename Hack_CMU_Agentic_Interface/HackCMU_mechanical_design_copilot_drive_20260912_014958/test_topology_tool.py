@@ -24,11 +24,22 @@ def _candidate() -> ImportedCandidateGeometry:
 
 
 class TopologyToolTests(unittest.TestCase):
-    def test_no_candidate_is_mock(self) -> None:
-        out = topology_tool.run_topology_optimization(_inp(None))
-        self.assertTrue(out.is_mock)
-        self.assertIn("no candidate", out.notes)
-        self.assertEqual(out.mass_reduction_pct, 60.0)
+    def test_no_candidate_designs_from_scratch(self) -> None:
+        """Without a candidate mesh the tool still runs live (from requirements), not a mock."""
+        seen = {}
+
+        def fake(inp, out_root=None, log=None, progress=None):
+            seen["candidate"] = inp.get("candidate")
+            return {"is_mock": False, "optimized_geometry_ref": "/tmp/d.stl", "solver_status": "converged",
+                    "model": "from scratch", "notes": "designed from the requirements"}
+
+        with mock.patch.dict(os.environ, {"TO_AGENT_MODE": "auto"}), mock.patch.object(
+            topology_tool, "_import_adapter", return_value=fake
+        ):
+            out = topology_tool.run_topology_optimization(_inp(None))
+        self.assertIsNone(seen["candidate"])
+        self.assertFalse(out.is_mock)
+        self.assertIn("requirements", out.notes)
 
     def test_mode_off_is_mock(self) -> None:
         with mock.patch.dict(os.environ, {"TO_AGENT_MODE": "off"}):
@@ -37,22 +48,26 @@ class TopologyToolTests(unittest.TestCase):
         self.assertIn("TO_AGENT_MODE=off", out.notes)
 
     def test_adapter_failure_degrades_to_mock(self) -> None:
-        def boom(_inp, out_root=None, log=None):
+        def boom(_inp, out_root=None, log=None, progress=None):
             raise ValueError("problem too big")
 
-        with mock.patch.object(topology_tool, "_import_adapter", return_value=boom):
+        with mock.patch.dict(os.environ, {"TO_AGENT_MODE": "auto"}), mock.patch.object(
+            topology_tool, "_import_adapter", return_value=boom
+        ):
             out = topology_tool.run_topology_optimization(_inp(_candidate()))
         self.assertTrue(out.is_mock)
         self.assertIn("problem too big", out.notes)
 
     def test_import_error_degrades_to_mock(self) -> None:
-        with mock.patch.object(topology_tool, "_import_adapter", side_effect=ImportError("no torch")):
+        with mock.patch.dict(os.environ, {"TO_AGENT_MODE": "auto"}), mock.patch.object(
+            topology_tool, "_import_adapter", side_effect=ImportError("no torch")
+        ):
             out = topology_tool.run_topology_optimization(_inp(_candidate()))
         self.assertTrue(out.is_mock)
         self.assertIn("not importable", out.notes)
 
     def test_live_result_is_validated(self) -> None:
-        def fake(inp, out_root=None, log=None):
+        def fake(inp, out_root=None, log=None, progress=None):
             self.assertEqual(inp["candidate"]["task"], "cupholder")
             return {
                 "is_mock": False,
@@ -69,7 +84,9 @@ class TopologyToolTests(unittest.TestCase):
                 "notes": "ok",
             }
 
-        with mock.patch.object(topology_tool, "_import_adapter", return_value=fake):
+        with mock.patch.dict(os.environ, {"TO_AGENT_MODE": "auto"}), mock.patch.object(
+            topology_tool, "_import_adapter", return_value=fake
+        ):
             out = topology_tool.run_topology_optimization(_inp(_candidate()))
         self.assertIsInstance(out, TopologyOutput)
         self.assertFalse(out.is_mock)

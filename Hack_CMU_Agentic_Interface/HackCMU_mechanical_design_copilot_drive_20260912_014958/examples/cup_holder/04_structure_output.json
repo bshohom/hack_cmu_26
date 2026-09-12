@@ -22,18 +22,18 @@
     {
       "id": "cup_ring",
       "position_mm": [
-        130.0,
+        110.5,
         0.0,
-        25.0
+        45.0
       ],
       "role": "load"
     },
     {
       "id": "cup_base",
       "position_mm": [
-        130.0,
+        110.5,
         0.0,
-        7.5
+        35.0
       ],
       "role": "load"
     }
@@ -158,5 +158,12 @@
       ],
       "notes": "quasi-static gravity from payload.filled_mass_kg=1.1 kg (provenance=geometry_output, not part mass)"
     }
-  ]
+  ],
+  "parameters": {
+    "support_thickness_mm": 4.0,
+    "brace_count": 1,
+    "brace_thickness_mm": 3.0,
+    "ring_support_width_mm": 8.0
+  },
+  "iteration": 0
 }

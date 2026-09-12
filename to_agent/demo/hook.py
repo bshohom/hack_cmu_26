@@ -73,7 +73,9 @@ def measure_hook(points: np.ndarray, dims: dict) -> HookGeometry:
     seat_pts = points[(points[:, 0] > x_back_out + 30.0) & (points[:, 0] < x_tip[0] - 3.0) & (np.abs(points[:, 1]) < hook_half_w)]
     faces = sorted(_horizontal_faces(seat_pts[:, 2]))
     z_seat = faces[-1] if faces else float(seat_pts[:, 2].max())
-    x_seat = (x_back_out + 30.0, x_tip[0] - 2.0)
+    # The seat runs all the way to the tip: the strap bears on the whole horizontal arm and
+    # is retained by the tip, so seat and tip must stay one connected body.
+    x_seat = (x_back_out + 25.0, x_max)
     return HookGeometry(
         x_min, x_max, x_back_in, x_back_out, z_bot_arm, z_top_arm, z_rib_lo, z_rib_hi,
         z_seat, x_seat, x_tip, z_tip_top, half_w, hook_half_w, z_rib_hi - z_rib_lo,
@@ -113,14 +115,18 @@ def build_hook_problem(
         ],
         void=[
             BoxRegion(min=(float(lo[0] - pad), float(lo[1] - pad), g.z_rib_lo), max=(g.x_back_in, float(hi[1] + pad), g.z_rib_hi)),  # the desk
-            BoxRegion(min=(g.x_seat[0], -g.hook_half_w - 3.0, g.z_seat + 1.0), max=(g.x_tip[0] - 1.0, g.hook_half_w + 3.0, float(hi[2] + pad))),  # strap opening
+            BoxRegion(min=(g.x_seat[0], -g.hook_half_w - 3.0, g.z_seat + 1.0), max=(g.x_tip[0] - 1.0, g.hook_half_w + 3.0, g.z_tip_top - 1.0)),  # strap opening
         ],
         supports=[
             Support(id="top_jaw", region=BoxRegion(min=(g.x_min + 2, -g.half_w, g.z_rib_hi - 0.5), max=(g.x_back_in - 2, g.half_w, g.z_rib_hi + h)), confidence=ASSUMED),
             Support(id="bottom_jaw", region=BoxRegion(min=(g.x_min + 2, -g.half_w, g.z_rib_lo - h), max=(g.x_back_in - 2, g.half_w, g.z_rib_lo + 0.5)), confidence=ASSUMED),
         ],
         load_cases=[
+            # Strap weight, distributed over the whole horizontal arm it rests on.
             LoadCase(id="static_gravity", region=BoxRegion(min=(g.x_seat[0], -g.hook_half_w, g.z_seat - h), max=(g.x_seat[1], g.hook_half_w, g.z_seat + 1.0)), force_N=(0.0, 0.0, -9.81 * mass), confidence=ASSUMED),
+            # Strap pulling outward against the tip: this is what makes the tip load-bearing
+            # (preserved-but-unloaded geometry gets disconnected by the optimizer).
+            LoadCase(id="tip_retention", region=BoxRegion(min=(g.x_tip[0] - 1.0, -g.hook_half_w, g.z_seat - h), max=(g.x_tip[1], g.hook_half_w, g.z_tip_top)), force_N=(0.4 * 9.81 * mass, 0.0, 0.0), weight=1.0, confidence=ASSUMED),
             LoadCase(id="side_swing", region=BoxRegion(min=(g.x_seat[0], -g.hook_half_w, g.z_seat - h), max=(g.x_seat[1], g.hook_half_w, g.z_seat + 1.0)), force_N=(0.0, 0.3 * 9.81 * mass, 0.0), weight=0.5, confidence=ASSUMED),
         ],
         safety_factor=safety_factor,

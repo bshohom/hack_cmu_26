@@ -83,6 +83,18 @@ def _warm_start_regions(candidate: dict, h: float) -> list:
     raise AdapterError("candidate has neither a usable mesh_path nor a particle_path")
 
 
+def _as_box(region: Any) -> Optional[dict]:
+    """Accept {"min","max"} or {"name","box":{"min","max"}} (generators emit both)."""
+    if not isinstance(region, dict):
+        return None
+    if "min" in region and "max" in region:
+        return region
+    inner = region.get("box") or region.get("bounds")
+    if isinstance(inner, dict) and "min" in inner and "max" in inner:
+        return {**{k: v for k, v in region.items() if k != "box"}, **inner}
+    return None
+
+
 def _box(d: dict, pad: float = 0.0) -> BoxRegion:
     lo = [float(v) - pad for v in d["min"]]
     hi = [float(v) + pad for v in d["max"]]
@@ -119,16 +131,22 @@ def build_generated_problem(candidate: dict, topology_input: dict, h: float, vol
     mesh_region = warm[0]
 
     load_id, force = _primary_force(topology_input.get("loads", []))
-    load_box = _box(regions["load"], pad=0.5)
-    preserve = [IntersectionRegion(regions=[mesh_region, _box(regions["load"], pad=h)])]
+    load_raw = _as_box(regions.get("load"))
+    if load_raw is None:
+        raise AdapterError("generated candidate regions have no usable 'load' box")
+    load_box = _box(load_raw, pad=0.5)
+    preserve = [IntersectionRegion(regions=[mesh_region, _box(load_raw, pad=h)])]
     supports = []
-    for i, m in enumerate(regions.get("mounts", [])):
+    for i, raw in enumerate(regions.get("mounts", [])):
+        m = _as_box(raw)
+        if m is None:
+            continue
         box = _box(m, pad=0.5)
         supports.append(Support(id=str(m.get("name") or f"mount_{i}"), region=box, confidence="generated"))
         preserve.append(IntersectionRegion(regions=[mesh_region, _box(m, pad=h)]))
     if not supports:
         raise AdapterError("generated candidate regions have no mounts")
-    void = [_box(k) for k in regions.get("keep_out", [])]
+    void = [_box(b) for b in (_as_box(k) for k in regions.get("keep_out", [])) if b is not None]
     if desk_t is not None:
         void.append(BoxRegion(min=(lo[0] - pad, lo[1] - pad, 0.0), max=(0.0, hi[1] + pad, float(desk_t))))
 
@@ -200,12 +218,39 @@ def volume_fraction_from_candidate(problem: TOProblem, candidate: dict) -> tuple
     )
 
 
-# ----------------------------------------------------------------------------- entry point
-def run_topology(topology_input: dict, out_root: str | Path | None = None, log: Log = None) -> dict:
-    """Return a dict with the TopologyOutput fields (is_mock=False) or raise AdapterError."""
+def estimate_topology(topology_input: dict) -> float:
+    """Predicted wall time (s) for this problem, without running it."""
+    opts = topology_input.get("solver_options") or {}
+    h = float(opts.get("element_size_mm") or 4.0)
     candidate = topology_input.get("candidate")
-    if not candidate:
-        raise AdapterError("no candidate geometry on TopologyInput (imported or generated warm start required)")
+    if candidate:
+        task = candidate.get("task") or "cupholder"
+        if task == "generated":
+            problem, _ = build_generated_problem(candidate, topology_input, h, 0.2, 2.5)
+        else:
+            problem, _ = build_from_registry(candidate, topology_input, h, None, 2.5)
+    else:
+        from .from_requirements import build_from_requirements
+
+        problem, _ = build_from_requirements(topology_input, element_size=h)
+    if opts.get("max_iters"):
+        problem.max_iters = int(opts["max_iters"])
+    return float(estimate_cost(problem, device=str(opts.get("device") or "auto")).total_sec)
+
+
+# ----------------------------------------------------------------------------- entry point
+def run_topology(
+    topology_input: dict,
+    out_root: str | Path | None = None,
+    log: Log = None,
+    progress: Optional[Callable[[int, int, float], None]] = None,
+) -> dict:
+    """Return a dict with the TopologyOutput fields (is_mock=False) or raise AdapterError.
+
+    With a candidate mesh the problem is built in that mesh's frame (warm-started); without
+    one it is built from the requirements alone (from scratch, uniform start).
+    """
+    candidate = topology_input.get("candidate")
     opts = topology_input.get("solver_options") or {}
     h = float(opts.get("element_size_mm") or 4.0)
     volfrac = opts.get("volume_fraction")
@@ -214,9 +259,21 @@ def run_topology(topology_input: dict, out_root: str | Path | None = None, log: 
     device = str(opts.get("device") or "auto")
     max_iters = opts.get("max_iters")
 
-    task = candidate.get("task") or "cupholder"
     notes: list[str] = []
-    if task == "generated":
+    if not candidate:
+        from .from_requirements import build_from_requirements
+
+        problem, report = build_from_requirements(
+            topology_input, element_size=h, volume_fraction=float(volfrac or 0.22), safety_factor=safety_factor
+        )
+        notes.append("no candidate mesh: designed from the requirements (from scratch)")
+        candidate = {"candidate_name": "from_requirements", "task": "from_requirements"}
+        task = "from_requirements"
+    else:
+        task = candidate.get("task") or "cupholder"
+    if task == "from_requirements":
+        pass
+    elif task == "generated":
         problem, report = build_generated_problem(candidate, topology_input, h, float(volfrac or 0.2), safety_factor)
         if volfrac is None:
             problem.volume_fraction, vf_note = volume_fraction_from_candidate(problem, candidate)
@@ -248,13 +305,13 @@ def run_topology(topology_input: dict, out_root: str | Path | None = None, log: 
     name = candidate.get("candidate_name") or task
     out_dir = Path(out_root or DEFAULT_OUT_ROOT) / f"{name}_{time.strftime('%Y%m%d_%H%M%S')}"
     try:
-        outcome = run_problem(problem, out_dir, device=device, log=log)
+        outcome = run_problem(problem, out_dir, device=device, log=log, progress=progress)
     except CostTooHigh as exc:
         raise AdapterError(f"problem too big: {exc.estimate.message}") from exc
     except RuntimeError as exc:
         if device != "cpu" and "cuda" in str(exc).lower():
             notes.append(f"CUDA failed ({str(exc)[:120]}); retried on cpu")
-            outcome = run_problem(problem, out_dir, device="cpu", log=log)
+            outcome = run_problem(problem, out_dir, device="cpu", log=log, progress=progress)
         else:
             raise
     return topology_output(outcome, candidate, problem, notes, report)

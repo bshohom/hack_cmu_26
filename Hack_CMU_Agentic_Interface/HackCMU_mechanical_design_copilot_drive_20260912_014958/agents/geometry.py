@@ -18,6 +18,13 @@ from schemas import (
 
 PLA_DENSITY_KG_MM3 = 1.24e-6
 
+# Per payload kind: (part shape, load region name, how the payload bears on the part).
+PAYLOAD_KINDS = {
+    "cylinder": ("clamp_arm_ring", "cup_cavity", "payload weight in the cup ring/base"),
+    "strap": ("clamp_arm_hook", "strap_seat", "strap weight distributed over the hook arm contact patch"),
+    "box": ("clamp_shelf", "platform", "payload weight distributed over the flat platform"),
+}
+
 
 class GeometryAgent:
     """Placeholder geometry interpretation.
@@ -29,7 +36,9 @@ class GeometryAgent:
 
     def run(self, inp: GeometryInput) -> GeometryOutput:
         req = inp.requirements
-        diameter = req.object_geometry.bottle_diameter_mm or 0.0
+        kind = req.object_geometry.kind if req.object_geometry.kind in PAYLOAD_KINDS else "cylinder"
+        shape, load_name, load_note = PAYLOAD_KINDS[kind]
+        size = req.object_geometry.bottle_diameter_mm or 0.0
         height = req.object_geometry.bottle_height_mm or 250.0
         desk_t = req.environment.desk_thickness_mm or 0.0
         protrusion = req.design_envelope.max_protrusion_mm or 0.0
@@ -41,24 +50,39 @@ class GeometryAgent:
             surface_normal=req.environment.surface_normal,
         )
         payload_object = ObjectGeometry(
-            kind="cylinder",
-            bottle_diameter_mm=diameter,
+            kind=kind,
+            bottle_diameter_mm=size,
             bottle_height_mm=height,
             filled_mass_kg=req.payload.filled_mass_kg,
         )
+
+        # Where the payload bears on the part, and how far the part reaches, depend on the
+        # payload kind: a cup sits above the desk, a bag hangs below it, a shelf lifts above it.
+        if kind == "strap":
+            load_x = protrusion * 0.75
+            load_z = -max(25.0, desk_t)
+            part_height = desk_t + abs(load_z) + 20.0
+            part_width = max(size * 2.0, 40.0)
+        elif kind == "box":
+            load_x = protrusion * 0.45
+            load_z = desk_t + max(40.0, height)
+            part_height = load_z + 10.0
+            part_width = max(size * 1.4, 60.0)
+        else:
+            load_x = protrusion * 0.85
+            load_z = desk_t + 10.0
+            part_height = desk_t + 20.0
+            part_width = max(size * 1.6, 1.0)
+
         envelope = DesignEnvelope(
             max_protrusion_mm=protrusion,
-            max_width_mm=diameter * 1.6 if diameter else None,
-            max_height_mm=desk_t + height * 0.4 if desk_t else None,
+            max_width_mm=part_width if size else None,
+            max_height_mm=part_height if desk_t else None,
         )
-
-        part_length = protrusion
-        part_width = max(diameter * 1.6, 1.0)
-        part_height = desk_t + 20.0
-        volume = max(part_length * part_width * part_height * 0.15, 1.0)
+        volume = max(protrusion * part_width * part_height * 0.15, 1.0)
         part = PartGeometry(
-            shape="clamp_arm_ring",
-            length_mm=part_length,
+            shape=shape,
+            length_mm=protrusion,
             width_mm=part_width,
             height_mm=part_height,
             volume_mm3=volume,
@@ -76,10 +100,10 @@ class GeometryAgent:
         ]
         load_regions = [
             LoadRegion(
-                name="cup_cavity",
-                position_mm=(protrusion * 0.85, 0.0, desk_t + 10.0),
+                name=load_name,
+                position_mm=(load_x, 0.0, load_z),
                 direction=(0.0, 0.0, -1.0),
-                notes="bottle weight applied in cup ring/base",
+                notes=load_note,
             )
         ]
 
@@ -100,7 +124,7 @@ class GeometryAgent:
             attachment_regions=attachment_regions,
             load_regions=load_regions,
             notes=(
-                "Simplified engineering geometry from measurements. "
+                f"Simplified engineering geometry from measurements ({kind} payload). "
                 "Not exact CAD from an image."
             ),
         )

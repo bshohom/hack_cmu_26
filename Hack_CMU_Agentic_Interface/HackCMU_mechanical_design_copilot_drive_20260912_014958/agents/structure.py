@@ -39,11 +39,19 @@ class StructureAgent:
         force = -9.81 * payload_mass
         parameters, iteration = self._next_parameters(inp)
 
+        # Load nodes sit where the payload actually bears on the part, which the
+        # GeometryAgent places per payload kind (cup above the desk, bag below it, shelf
+        # on a raised platform). These node positions are reused as the topology warm start.
+        region = geom.load_regions[0] if geom.load_regions else None
+        load_x = float(region.position_mm[0]) if region else protrusion
+        load_z = float(region.position_mm[2]) if region else desk_t
+        upper_z = load_z + max(0.25 * abs(load_z - desk_t), 10.0)
+
         nodes = [
             Node(id="mount_upper", position_mm=(0.0, 0.0, desk_t), role="anchor"),
             Node(id="mount_lower", position_mm=(0.0, 0.0, 0.0), role="anchor"),
-            Node(id="cup_ring", position_mm=(protrusion, 0.0, desk_t), role="load"),
-            Node(id="cup_base", position_mm=(protrusion, 0.0, desk_t * 0.3), role="load"),
+            Node(id="cup_ring", position_mm=(load_x, 0.0, upper_z), role="load"),
+            Node(id="cup_base", position_mm=(load_x, 0.0, load_z), role="load"),
         ]
         members = [
             Member(

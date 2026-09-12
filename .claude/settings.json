@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s --max-time 3 http://localhost:8765/_stcore/health)",
+      "Bash(echo \"health: $\\(curl -s --max-time 3 http://localhost:8765/_stcore/health 2>/dev/null || echo down\\) on http://localhost:8765\")",
+      "Bash(/home/shohom-tfc/miniconda3/envs/hack_cmu_26/bin/python -c ' *)",
+      "Read(//home/shohom-tfc/.cache/huggingface/hub/**)"
+    ]
+  }
+}

@@ -49,6 +49,14 @@ def contains(region, pts: np.ndarray) -> np.ndarray:
         return (r >= region.r_min) & (r <= region.r_max) & (a >= region.along[0]) & (a <= region.along[1])
     if t == "sphere":
         return np.linalg.norm(pts - np.asarray(region.center), axis=1) <= region.radius
+    if t == "capsule":
+        a, b = np.asarray(region.a, float), np.asarray(region.b, float)
+        ab = b - a
+        len2 = float(ab @ ab)
+        if len2 < 1e-12:
+            return np.linalg.norm(pts - a, axis=1) <= region.radius
+        s = np.clip((pts - a) @ ab / len2, 0.0, 1.0)
+        return np.linalg.norm(pts - (a + s[:, None] * ab), axis=1) <= region.radius
     if t == "halfspace":
         return (pts - np.asarray(region.point)) @ np.asarray(region.normal) >= 0.0
     if t == "near_points":
@@ -98,6 +106,9 @@ def bounds(region) -> tuple[np.ndarray, np.ndarray] | None:
     if t == "sphere":
         cen = np.asarray(region.center, float)
         return cen - region.radius, cen + region.radius
+    if t == "capsule":
+        ab = np.vstack([np.asarray(region.a, float), np.asarray(region.b, float)])
+        return ab.min(axis=0) - region.radius, ab.max(axis=0) + region.radius
     if t == "halfspace":
         return None
     if t == "near_points":

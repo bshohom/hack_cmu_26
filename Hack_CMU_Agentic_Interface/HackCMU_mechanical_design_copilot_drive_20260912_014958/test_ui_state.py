@@ -162,11 +162,16 @@ class StreamlitWidgetOwnershipTests(unittest.TestCase):
         self.assertIn("100", "".join(item["text"] for item in at.session_state.chat))
         self.assertIn("85", "".join(item["text"] for item in at.session_state.chat))
 
-    def test_new_session_defaults_to_adaptive_geometry(self) -> None:
-        from geometry_sources import GEOM_ADAPTIVE
+    def test_new_session_defaults_to_generated_warm_start(self) -> None:
+        """Warm-start geometry is generated from the user's own measurements, so it is the
+        default; without a generator configured the session falls back to the synthetic mock."""
+        from app import _default_geometry_mode
+        from geometry_sources import GEOM_ADAPTIVE, GEOM_GENERATED
 
         at = self._app()
-        self.assertEqual(at.session_state.mode_geom, GEOM_ADAPTIVE)
+        self.assertEqual(at.session_state.mode_geom, _default_geometry_mode())
+        self.assertIn(at.session_state.mode_geom, (GEOM_GENERATED, GEOM_ADAPTIVE))
+        self.assertEqual(at.session_state.mode_topo, "Live")
 
     def test_happy_path_switches_to_golden_geometry(self) -> None:
         from geometry_sources import GEOM_GOLDEN
@@ -175,13 +180,14 @@ class StreamlitWidgetOwnershipTests(unittest.TestCase):
         self._click(at, "Load Happy Path")
         self.assertEqual(at.session_state.mode_geom, GEOM_GOLDEN)
 
-    def test_reset_session_restores_adaptive_geometry(self) -> None:
-        from geometry_sources import GEOM_ADAPTIVE, GEOM_GOLDEN
+    def test_reset_session_restores_default_geometry(self) -> None:
+        from app import _default_geometry_mode
+        from geometry_sources import GEOM_GOLDEN
 
         at = self._app()
         at.radio(key="mode_geom").set_value(GEOM_GOLDEN).run()
         self._click(at, "Reset session")
-        self.assertEqual(at.session_state.mode_geom, GEOM_ADAPTIVE)
+        self.assertEqual(at.session_state.mode_geom, _default_geometry_mode())
 
 
 if __name__ == "__main__":

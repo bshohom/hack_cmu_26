@@ -38,10 +38,19 @@ Rules (violations fail validation and you will be asked to fix them):
     PARAMS: dict            # named dimensions in mm used by build()
     def build(params: dict) -> trimesh.Trimesh   # returns ONE watertight connected body
     DIMENSIONS: dict        # key dimensions in mm for humans (e.g. {"Inner diameter": 90.0})
-    REGIONS: dict           # {"load": {"min":[x,y,z],"max":[x,y,z]},                # where the payload weight acts
-                            #  "mounts": [{"name": str, "min":[...], "max":[...]}],  # desk contact faces (fixed)
-                            #  "keep_out": [{"name": str, "min":[...], "max":[...]}]}  # cavities that must stay empty
+    REGIONS: dict           # see below
     NOTES: list[str]
+- REGIONS boxes are axis-aligned {"min":[x,y,z], "max":[x,y,z]} in the same frame as the mesh:
+    "load":     ONE box around the PART SURFACE THAT THE PAYLOAD PUSHES ON. It must be filled
+                with your part's material, not with the payload and not with empty space.
+                A cup holder: the cup floor slab the bottle stands on. A hook: the top face of
+                the horizontal arm the strap lies across. A shelf: the top face of the platform.
+                It is NOT the bottle's volume, NOT the hanging bag, NOT the hook's open throat.
+    "mounts":   [{"name":..., box}] on the PART SURFACES THAT TOUCH THE DESK — the underside of
+                the upper clamp arm (at z = desk_thickness_mm) and the top of the lower arm
+                (at z = 0). Each must be filled with your material.
+    "keep_out": [{"name":..., box}] volumes that must stay empty, e.g. the payload cavity.
+  Validation samples each load/mount box and requires material there, so place them on real faces.
 - Build from trimesh.creation.box(extents, transform) / cylinder(radius, height, sections, transform) /
   annulus(r_min, r_max, height, transform) and combine with trimesh.boolean.union(meshes, engine="manifold")
   and trimesh.boolean.difference([a, b], engine="manifold"). Overlap bodies by >=1 mm before union so
@@ -64,11 +73,33 @@ class WarmStartResult:
     regions: Dict[str, Any] = field(default_factory=dict)
 
 
+PAYLOAD_GUIDANCE = {
+    "cylinder": (
+        "The payload is a bottle/cup standing upright. Build a ring wall plus a floor slab and "
+        "cantilever it from the clamp. REGIONS['load'] = the floor slab under the payload; "
+        "REGIONS['keep_out'] = the cylindrical cavity above that floor."
+    ),
+    "strap": (
+        "The payload is a bag hanging by its strap, so the part is a HOOK: the clamp grips the "
+        "desk edge, an arm descends below the desk (negative z) and turns outward into a "
+        "horizontal arm with a raised tip that retains the strap. REGIONS['load'] = the top face "
+        "of that horizontal arm (solid material), NOT the open throat the strap passes through."
+    ),
+    "box": (
+        "The payload is a box-shaped object resting on a raised flat platform. Build a flat "
+        "platform at the requested lift height on a column/legs. REGIONS['load'] = the platform's "
+        "top face slab."
+    ),
+}
+
+
 def requirements_prompt(req: UserRequirements, name: str) -> str:
     env = req.environment
     obj = req.object_geometry
     desk_t = env.desk_thickness_mm
-    lines = [
+    guidance = PAYLOAD_GUIDANCE.get(obj.kind or "cylinder", PAYLOAD_GUIDANCE["cylinder"])
+    lines = [guidance, ""]
+    lines += [
         f"Design a {req.description or 'desk-mounted holder'} named `{name}`.",
         f"User request: {req.user_message or req.description}",
         f"Payload: {req.payload.description}, filled mass {req.payload.filled_mass_kg} kg"
@@ -84,11 +115,7 @@ def requirements_prompt(req: UserRequirements, name: str) -> str:
     ]
     if req.part_mass.max_part_mass_kg:
         lines.append(f"Printed part mass limit: {req.part_mass.max_part_mass_kg} kg")
-    lines.append(
-        "The payload must be held with clearance >= 2 mm; REGIONS['load'] is the box where its weight rests "
-        "(e.g. the cup floor); REGIONS['mounts'] are the faces touching the desk top and underside; "
-        "REGIONS['keep_out'] includes the payload cavity."
-    )
+    lines.append("Hold the payload with >= 2 mm clearance. Return the script only.")
     return "\n".join(lines)
 
 

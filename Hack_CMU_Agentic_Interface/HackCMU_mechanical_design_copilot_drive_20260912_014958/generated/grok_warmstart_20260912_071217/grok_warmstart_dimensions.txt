@@ -1,0 +1,21 @@
+grok_warmstart — generated warm start
+Units: mm
+
+DESIGN DIMENSIONS
+- Desk thickness: 25.0
+- Clamp depth: 45.0
+- Protrusion: 100.0
+- Hook inner radius: 12.0
+- Width: 35.0
+
+NOTES
+- grok_warmstart
+- 5kg bag hook, 4-5mm walls, PLA
+
+MESH
+- Vertices: 30
+- Faces: 56
+- Watertight: True
+- Connected components: 1
+- Bounding box min: [-45.0, -17.5, -6.0]
+- Bounding box max: [100.0, 17.5, 30.0]

@@ -96,6 +96,7 @@ class Orchestrator:
         imported_candidate: Optional[ImportedCandidateGeometry] = None,
         topology_options: Optional[TopologySolverOptions] = None,
         topology_log=None,
+        topology_progress=None,
         warm_start_generator=None,
     ) -> None:
         self.state = DesignState()
@@ -109,6 +110,7 @@ class Orchestrator:
         self.imported_candidate = imported_candidate
         self.topology_options = topology_options
         self.topology_log = topology_log
+        self.topology_progress = topology_progress
         # Callable[[UserRequirements], Optional[ImportedCandidateGeometry]]: generates the
         # warm-start candidate (e.g. Grok-written trimesh script) when none was imported.
         self.warm_start_generator = warm_start_generator
@@ -465,8 +467,15 @@ class Orchestrator:
                 candidate=self.state.imported_candidate,
                 desk_thickness_mm=self.state.geometry.environment.desk_thickness_mm,
                 solver_options=self.topology_options,
+                envelope=self.state.geometry.design_envelope,
+                attachment_method=(req.attachment.method if req else None),
+                payload_kind=self.state.geometry.payload_object.kind,
+                payload_size_mm=self.state.geometry.payload_object.bottle_diameter_mm,
+                structure=self.state.structure,
             )
-            self.state.topology = run_topology_optimization(inp, log=self.topology_log)
+            self.state.topology = run_topology_optimization(
+                inp, log=self.topology_log, progress=self.topology_progress
+            )
         if self.state.analysis.is_mock or self.state.topology.is_mock:
             self.state.safety_status = SafetyStatus.UNVERIFIED
         self.state.stage = WorkflowStage.VERIFICATION

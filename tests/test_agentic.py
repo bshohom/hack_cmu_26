@@ -20,9 +20,40 @@ def topology_input(candidate: dict | None) -> dict:
     }
 
 
-def test_no_candidate_raises():
-    with pytest.raises(AdapterError, match="no candidate"):
-        run_topology(topology_input(None))
+def test_no_candidate_designs_from_requirements(tmp_path):
+    """Without a candidate mesh the adapter designs from the requirements instead of failing."""
+    data = topology_input(None)
+    data.update(
+        desk_thickness_mm=20.0,
+        payload_kind="strap",
+        payload_size_mm=15.0,
+        attachment_method="clamp",
+        envelope={"max_protrusion_mm": 90.0, "max_width_mm": 40.0, "max_height_mm": 60.0},
+        structure={
+            "nodes": [
+                {"id": "mount_upper", "position_mm": [0, 0, 20]},
+                {"id": "mount_lower", "position_mm": [0, 0, 0]},
+                {"id": "load", "position_mm": [65, 0, -25]},
+            ],
+            "members": [
+                {"start_node_id": "mount_upper", "end_node_id": "load"},
+                {"start_node_id": "mount_lower", "end_node_id": "load"},
+            ],
+            "parameters": {"support_thickness_mm": 8.0},
+        },
+    )
+    data["solver_options"] = {"element_size_mm": 9.0, "max_iters": 2, "device": "cpu"}
+    out = run_topology(data, out_root=tmp_path)
+    assert out["is_mock"] is False
+    assert Path(out["optimized_geometry_ref"]).exists()
+    assert "from scratch" in out["notes"]
+    assert out["problem_report"]["mode"] == "from_requirements"
+    assert "structural member" in out["problem_report"]["warm_start"]
+
+
+def test_missing_loads_raises():
+    with pytest.raises((AdapterError, ValueError), match="load"):
+        run_topology({"candidate": None, "loads": []})
 
 
 def test_cupholder_live(tmp_path):

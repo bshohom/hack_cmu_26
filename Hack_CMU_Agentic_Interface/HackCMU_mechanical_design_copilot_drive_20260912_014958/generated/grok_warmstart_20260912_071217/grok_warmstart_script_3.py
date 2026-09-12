@@ -1,0 +1,74 @@
+import numpy as np
+import trimesh
+import math
+
+PARAMS = {
+    "desk_thickness": 25.0,
+    "clamp_length": 45.0,
+    "clamp_gap": 27.0,
+    "arm_thickness": 5.0,
+    "width": 35.0,
+    "protrusion": 100.0,
+    "hook_r": 12.0,
+    "hook_thickness": 6.0,
+    "wall": 5.0
+}
+
+def build(params):
+    d = {**PARAMS, **params}
+    dt = d["desk_thickness"]
+    cl = d["clamp_length"]
+    cg = d["clamp_gap"]
+    at = d["arm_thickness"]
+    w = d["width"]
+    pr = d["protrusion"]
+    hr = d["hook_r"]
+    ht = d["hook_thickness"]
+    wall = d["wall"]
+
+    # lower clamp arm (x<0)
+    lower = trimesh.creation.box(extents=[cl, w, at],
+        transform=trimesh.transformations.translation_matrix([-cl/2, 0, -at/2]))
+    # upper clamp arm (x<0)
+    upper = trimesh.creation.box(extents=[cl, w, at],
+        transform=trimesh.transformations.translation_matrix([-cl/2, 0, dt + at/2]))
+    # vertical back at x=0
+    back = trimesh.creation.box(extents=[wall, w, dt + 2*at],
+        transform=trimesh.transformations.translation_matrix([-wall/2, 0, dt/2]))
+    # main arm to protrusion
+    arm = trimesh.creation.box(extents=[pr, wall, ht],
+        transform=trimesh.transformations.translation_matrix([pr/2, 0, -ht/2]))
+    # hook cylinder
+    hook_cyl = trimesh.creation.cylinder(radius=hr, height=ht,
+        sections=64, transform=trimesh.transformations.translation_matrix([pr - hr, 0, -ht/2 - hr]))
+    # hook connector
+    conn = trimesh.creation.box(extents=[hr, wall, ht],
+        transform=trimesh.transformations.translation_matrix([pr - hr/2, 0, -ht/2 - hr]))
+    meshes = [lower, upper, back, arm, hook_cyl, conn]
+    part = trimesh.boolean.union(meshes, engine="manifold")
+    # remove payload space (keep_out cylinder)
+    payload = trimesh.creation.cylinder(radius=hr + 1.5, height=ht + 4,
+        sections=64, transform=trimesh.transformations.translation_matrix([pr - hr, 0, -ht/2 - hr]))
+    part = trimesh.boolean.difference([part, payload], engine="manifold")
+    return part
+
+DIMENSIONS = {
+    "Desk thickness": 25.0,
+    "Clamp depth": 45.0,
+    "Protrusion": 100.0,
+    "Hook inner radius": 12.0,
+    "Width": 35.0
+}
+
+REGIONS = {
+    "load": {"min": [82.0, -5.0, -27.0], "max": [88.0, 5.0, -24.0]},
+    "mounts": [
+        {"name": "top", "min": [-45.0, -17.5, 25.0], "max": [0.0, 17.5, 30.0]},
+        {"name": "bottom", "min": [-45.0, -17.5, -5.0], "max": [0.0, 17.5, 0.0]}
+    ],
+    "keep_out": [
+        {"name": "payload", "min": [76.0, -17.5, -42.0], "max": [100.0, 17.5, -18.0]}
+    ]
+}
+
+NOTES = ["grok_warmstart", "5kg bag hook, 4-5mm walls, PLA"]

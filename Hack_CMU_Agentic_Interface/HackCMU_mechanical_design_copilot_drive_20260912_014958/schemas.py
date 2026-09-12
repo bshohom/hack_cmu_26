@@ -468,6 +468,14 @@ class TopologyInput(BaseModel):
     candidate: Optional["ImportedCandidateGeometry"] = None
     desk_thickness_mm: Optional[float] = None
     solver_options: Optional[TopologySolverOptions] = None
+    # Enough context to design from scratch when there is no candidate mesh.
+    envelope: Optional[DesignEnvelope] = None
+    attachment_method: Optional[str] = None
+    payload_kind: Optional[str] = None  # cylinder | strap | box
+    payload_size_mm: Optional[float] = None
+    # Coarse structural layout: its members are rasterized as the warm-start density field
+    # when there is no candidate mesh, so SIMP starts from a real load path.
+    structure: Optional["StructureOutput"] = None
 
 
 class TopologyOutput(BaseModel):

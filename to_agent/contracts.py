@@ -44,6 +44,15 @@ class SphereRegion(BaseModel):
     radius: float
 
 
+class CapsuleRegion(BaseModel):
+    """Points within `radius` of the segment a-b: one structural member / rod."""
+
+    type: Literal["capsule"] = "capsule"
+    a: Vec3
+    b: Vec3
+    radius: float
+
+
 class HalfSpaceRegion(BaseModel):
     """Points p with (p - point) . normal >= 0."""
 
@@ -98,6 +107,7 @@ Region = Annotated[
         BoxRegion,
         CylinderRegion,
         SphereRegion,
+        CapsuleRegion,
         HalfSpaceRegion,
         NearPointsRegion,
         InsideMeshRegion,

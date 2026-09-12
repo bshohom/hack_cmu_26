@@ -33,6 +33,18 @@ def _load_script(path: Path):
     return module
 
 
+def as_box(region: dict | None) -> dict | None:
+    """Accept {"min","max"} or {"name","box":{"min","max"}} (models emit both)."""
+    if not isinstance(region, dict):
+        return None
+    if "min" in region and "max" in region:
+        return region
+    inner = region.get("box") or region.get("bounds")
+    if isinstance(inner, dict) and "min" in inner and "max" in inner:
+        return {**{k: v for k, v in region.items() if k != "box"}, **inner}
+    return None
+
+
 def _box(region: dict) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(region["min"], float), np.asarray(region["max"], float)
 
@@ -64,18 +76,24 @@ def validate(mesh: trimesh.Trimesh, regions: dict, envelope: dict) -> list[str]:
     for key in ("load", "mounts"):
         if key not in regions:
             problems.append(f"REGIONS is missing '{key}'")
-    load = regions.get("load")
-    if isinstance(load, dict) and "min" in load and "max" in load:
+    load = as_box(regions.get("load"))
+    if load is not None:
         lmin, lmax = _box(load)
         if np.any(lmax < lo) or np.any(lmin > hi):
-            problems.append("REGIONS['load'] box does not overlap the part bounding box")
+            problems.append(
+                f"REGIONS['load'] box {np.round(lmin,1).tolist()}..{np.round(lmax,1).tolist()} lies outside the "
+                f"part bounds {np.round(lo,1).tolist()}..{np.round(hi,1).tolist()}. It must be a slab of YOUR "
+                "material where the payload presses on the part (cup floor / hook arm top face / platform top), "
+                "not the payload's own position or the empty space it hangs in."
+            )
         else:
             problems += _region_touches_part(mesh, load, "REGIONS['load']")
     mounts = regions.get("mounts") or []
     if isinstance(mounts, list) and not mounts:
         problems.append("REGIONS['mounts'] must list at least one contact box")
-    for i, m in enumerate(mounts if isinstance(mounts, list) else []):
-        if isinstance(m, dict) and "min" in m and "max" in m:
+    for i, raw in enumerate(mounts if isinstance(mounts, list) else []):
+        m = as_box(raw)
+        if m is not None:
             problems += _region_touches_part(mesh, m, f"REGIONS['mounts'][{i}] ({m.get('name', '')})")
     return problems
 

@@ -156,6 +156,7 @@ def optimize(
     device: torch.device,
     log: LogFn | None = print,
     max_iters: int | None = None,
+    progress: Callable[[int, int, float], None] | None = None,
 ) -> SIMPResult:
     t_start = time.time()
     model, tdev, mode = make_model(mesh, masks, problem, device)
@@ -218,6 +219,8 @@ def optimize(
         result.iters = it + 1
         if log:
             log(f"  it {it:3d}  C={compliance:12.5g}  vol={vol:.3f}  change={change:.3f}  {dt:5.2f}s")
+        if progress:
+            progress(it + 1, iters, float(compliance))
         plateau = (
             it >= 10
             and abs(result.compliance[-6] - compliance) < 1e-3 * abs(compliance)

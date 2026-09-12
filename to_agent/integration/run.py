@@ -47,6 +47,7 @@ def run_problem(
     threshold: float = 0.5,
     force: bool = False,
     log: Optional[Callable[[str], None]] = None,
+    progress: Optional[Callable[[int, int, float], None]] = None,
 ) -> RunOutcome:
     out_dir = Path(out_dir)
     dev = pick_device(device)
@@ -60,7 +61,7 @@ def run_problem(
     mesh, masks = prepare(problem)
     if log:
         log("masks: " + json.dumps(masks.report))
-    result = optimize(problem, mesh, masks, dev, log=log)
+    result = optimize(problem, mesh, masks, dev, log=log, progress=progress)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     u0 = result.u[0] if result.u else None
