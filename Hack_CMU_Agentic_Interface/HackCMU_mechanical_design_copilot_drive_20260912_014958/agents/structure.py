@@ -42,7 +42,10 @@ class StructureAgent:
         # Load nodes sit where the payload actually bears on the part, which the
         # GeometryAgent places per payload kind (cup above the desk, bag below it, shelf
         # on a raised platform). These node positions are reused as the topology warm start.
+        # Load-case region_name must be a name that already exists on GeometryOutput —
+        # cup_cavity / strap_seat / platform — not a cup-holder hardcoded string.
         region = geom.load_regions[0] if geom.load_regions else None
+        load_region_name = region.name if region is not None else "payload"
         load_x = float(region.position_mm[0]) if region else protrusion
         load_z = float(region.position_mm[2]) if region else desk_t
         upper_z = load_z + max(0.25 * abs(load_z - desk_t), 10.0)
@@ -128,7 +131,7 @@ class StructureAgent:
             LoadCase(
                 load_case_id="static_gravity",
                 name="static_gravity",
-                region_name="cup_cavity",
+                region_name=load_region_name,
                 force_N=(0.0, 0.0, force),
                 notes=(
                     "quasi-static gravity from payload.filled_mass_kg="
