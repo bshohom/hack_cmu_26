@@ -5,7 +5,8 @@ Rule-based placeholder for later LLM reasoning. Does not chat with other agents.
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+import re
+from typing import List, NamedTuple, Optional, Tuple
 
 from schemas import (
     ClarificationQuestion,
@@ -17,42 +18,118 @@ from schemas import (
     VisionRequest,
 )
 
-# Out of scope for the hackathon MVP.
-UNSUPPORTED_PATTERNS: List[Tuple[str, str]] = [
-    ("stool", "Human-supporting furniture is out of scope."),
-    ("chair", "Human-supporting furniture is out of scope."),
-    ("seat", "Human-supporting furniture is out of scope."),
-    ("ladder", "Human-supporting structures are out of scope."),
-    ("person", "Human-supporting structures are out of scope."),
-    ("human", "Human-supporting structures are out of scope."),
-    # Body weight is often described without any of the words above ("a step to reach the
-    # sink", "something to stand on"). These are the floor; live reasoning may add more.
-    ("step stool", "Human-supporting furniture is out of scope."),
-    ("step to", "Anything a person stands on is out of scope."),
-    ("stand on", "Anything a person stands on is out of scope."),
-    ("standing on", "Anything a person stands on is out of scope."),
-    ("step up", "Anything a person stands on is out of scope."),
-    ("footstool", "Human-supporting furniture is out of scope."),
-    ("footrest", "Human-supporting furniture is out of scope."),
-    ("kneeler", "Human-supporting furniture is out of scope."),
-    ("bench", "Human-supporting furniture is out of scope."),
-    ("climb", "Human-supporting structures are out of scope."),
-    ("hold my weight", "Human-supporting structures are out of scope."),
-    ("support my weight", "Human-supporting structures are out of scope."),
-    ("grab bar", "Human-supporting / mobility aids are out of scope."),
-    ("handrail", "Human-supporting / mobility aids are out of scope."),
-    ("child seat", "Human-supporting furniture is out of scope."),
-    ("overhead", "Overhead mounts where a drop could injure are out of scope."),
-    ("ceiling", "Overhead mounts where a drop could injure are out of scope."),
-    ("impact", "Impact loading is out of scope."),
-    ("crash", "Impact loading is out of scope."),
-    ("fatigue", "Fatigue analysis is out of scope."),
-    ("weapon", "Weapons are unsupported."),
-    ("explosive", "This request is unsupported."),
-    ("gun", "Weapons are unsupported."),
-    ("motor", "Dynamic mechanisms are out of scope."),
-    ("hinge mechanism", "Dynamic mechanisms are out of scope."),
+# --------------------------------------------------------------------------- hazard floor
+#
+# Two tiers, because a single substring list cannot separate "a step to reach the sink"
+# (a person stands on it) from "a laptop stand on my desk" (an object rests on it).
+#
+#   HARD_HAZARDS      unambiguous: refuse outright, and reasoning may not overturn it.
+#   AMBIGUOUS_HAZARDS could go either way: never decided by keyword. They escalate — live
+#                     reasoning classifies them, and failing that the user is asked a direct
+#                     question. Nothing that carries a person proceeds undetermined, but an
+#                     ordinary object holder is no longer refused for containing "bench".
+#
+# Patterns are regexes matched with word boundaries, so "bench" does not fire on
+# "workbench" and "gun" does not fire on "gun-metal".
+
+HARD_HAZARDS: List[Tuple[str, str]] = [
+    (r"\bstep[- ]?stools?\b", "Human-supporting furniture is out of scope."),
+    (r"\bfoot[- ]?stools?\b", "Human-supporting furniture is out of scope."),
+    (r"\bfoot[- ]?rests?\b", "Human-supporting furniture is out of scope."),
+    (r"\bbar[- ]?stools?\b", "Human-supporting furniture is out of scope."),
+    (r"\bstools?\b", "Human-supporting furniture is out of scope."),
+    (r"\bchairs?\b", "Human-supporting furniture is out of scope."),
+    (r"\b(child|car|booster)[- ]seats?\b", "Human-supporting furniture is out of scope."),
+    (r"\bladders?\b", "Human-supporting structures are out of scope."),
+    (r"\bgrab[- ]bars?\b", "Human-supporting / mobility aids are out of scope."),
+    (r"\bhand[- ]?rails?\b", "Human-supporting / mobility aids are out of scope."),
+    (r"\bkneelers?\b", "Human-supporting furniture is out of scope."),
+    (r"\b(support|hold|bear|take)s?\s+(my|his|her|their|your|a person'?s|someone'?s)\s+(body\s+)?weight\b",
+     "Human-supporting structures are out of scope."),
+    # "stand" is only a hazard as a VERB. "to stand on", "stands on it", "standing on this"
+    # are a person; "a laptop stand on my desk" is a noun and must not be caught here.
+    # A determiner after "on" means the thing stands on a surface ("a laptop stand on my
+    # desk", "a rack that sits on the shelf"). Anything else — "to stand on", "sit on it",
+    # "a bracket I can sit on" — is a person putting their weight on it.
+    (r"\b(sit|sits|sitting|stand|stands|standing|kneel|kneels|kneeling|perch|perches)\s+on\b"
+     r"(?!\s+(my|the|a|an|your|his|her|its|their|each|either)\b)",
+     "Anything a person puts their weight on is out of scope."),
+    (r"\bweapons?\b", "Weapons are unsupported."),
+    (r"\bfirearms?\b", "Weapons are unsupported."),
+    (r"\bguns?\b", "Weapons are unsupported."),
+    (r"\bexplosives?\b", "This request is unsupported."),
 ]
+
+# (pattern, hazard class, the question that settles it)
+AMBIGUOUS_HAZARDS: List[Tuple[str, str, str]] = [
+    (r"\bstep\b|\bsteps\b|\bclimb|\bstep up\b",
+     "human_support",
+     "Will a person put any of their body weight on this part — standing, sitting, leaning "
+     "or pulling themselves up on it?"),
+    (r"\bseat\b|\bbench\b|\bperch\b",
+     "human_support",
+     "Will a person sit on or otherwise put their body weight on this part?"),
+    # A person word on its own is not a signal — "a rack for my kid's books" holds books.
+    # It only matters together with a weight-bearing action, which the hard rule above covers.
+    (r"\bceiling\b|\boverhead\b|\babove head\b|\bjoist\b|\brafter\b",
+     "overhead",
+     "Will this be mounted above head height, where the part or its load could fall on someone?"),
+    (r"\bimpact\b|\bcrash\b|\bshock load",
+     "impact",
+     "Will this part take sudden impact or shock loading, rather than a steady static load?"),
+    (r"\bfatigue\b|\bcyclic\b|\brepeated load",
+     "impact",
+     "Will this part see repeated load cycles where fatigue matters?"),
+    (r"\bmotor\b|\bhinge mechanism\b|\bactuator\b|\bspring loaded\b",
+     "dynamic",
+     "Does this part contain or drive a moving mechanism, rather than being a static fixture?"),
+]
+
+# Back-compat: the flat list other modules import. Hard hazards only — the ambiguous ones
+# are deliberately not auto-refusals any more.
+UNSUPPORTED_PATTERNS: List[Tuple[str, str]] = list(HARD_HAZARDS)
+
+
+# A person word AND a weight-bearing action in the same request is a person being supported,
+# even when no furniture noun appears: "a step to help my kid reach the sink". Neither half
+# alone is evidence — "a laptop stand on my desk" has the action and no person; "a rack for
+# my kid's books" has the person and no action.
+PERSON_WORDS = r"\b(kid|kids|child|children|toddler|baby|person|people|human|adult|myself|himself|herself)\b"
+WEIGHT_BEARING_ACTS = r"\b(stand|stands|standing|step|steps|stepping|sit|sits|sitting|climb|climbs|climbing|kneel|perch|reach|reaches)\b"
+
+
+class HazardSignal(NamedTuple):
+    """`verdict` is one of clear | refuse | ambiguous."""
+
+    verdict: str
+    hazard_class: str = "none"
+    reasons: List[str] = []
+    question: str = ""
+
+
+def classify_hazard(text: str) -> HazardSignal:
+    """Keyword floor only. It refuses the unmistakable and defers everything else."""
+    lowered = (text or "").lower()
+    for pattern, reason in HARD_HAZARDS:
+        if re.search(pattern, lowered):
+            return HazardSignal("refuse", "human_support", [reason], "")
+    if re.search(PERSON_WORDS, lowered) and re.search(WEIGHT_BEARING_ACTS, lowered):
+        return HazardSignal(
+            "refuse",
+            "human_support",
+            ["the request describes a person standing, stepping, sitting or climbing on the "
+             "part, which is out of scope however it is worded"],
+            "",
+        )
+    for pattern, hazard_class, question in AMBIGUOUS_HAZARDS:
+        if re.search(pattern, lowered):
+            return HazardSignal(
+                "ambiguous",
+                hazard_class,
+                [f"wording suggests a possible {hazard_class.replace('_', ' ')} hazard; not decided by keyword"],
+                question,
+            )
+    return HazardSignal("clear")
 
 # (keyword in the request, payload description, payload kind) — first match wins.
 PAYLOAD_KEYWORDS: List[Tuple[str, str, str]] = [
@@ -121,14 +198,14 @@ class InteractionAgent:
 
     def assess(self, message: str, existing: Optional[UserRequirements] = None) -> InteractionResult:
         lowered = message.lower()
-        for pattern, reason in UNSUPPORTED_PATTERNS:
-            if pattern in lowered:
-                req = existing or UserRequirements(user_message=message, description=message)
-                return InteractionResult(
-                    decision=InteractionDecision.REJECT_OR_ESCALATE,
-                    requirements=req,
-                    reject_reason=reason,
-                )
+        hazard = classify_hazard(message)
+        if hazard.verdict == "refuse":
+            req = existing or UserRequirements(user_message=message, description=message)
+            return InteractionResult(
+                decision=InteractionDecision.REJECT_OR_ESCALATE,
+                requirements=req,
+                reject_reason=hazard.reasons[0] if hazard.reasons else "Out of scope.",
+            )
 
         req = existing or UserRequirements()
         req.user_message = message

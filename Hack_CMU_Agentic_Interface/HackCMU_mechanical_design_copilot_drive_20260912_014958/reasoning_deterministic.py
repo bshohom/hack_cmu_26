@@ -10,7 +10,12 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from agents.interaction import PAYLOAD_KEYWORDS, REQUIRED_FIELDS, SIZE_QUESTIONS, UNSUPPORTED_PATTERNS
+from agents.interaction import (
+    PAYLOAD_KEYWORDS,
+    REQUIRED_FIELDS,
+    SIZE_QUESTIONS,
+    classify_hazard,
+)
 from reasoning_contracts import (
     EnvelopeSemantics,
     FailureMode,
@@ -41,19 +46,33 @@ def payload_kind_from_text(text: str) -> tuple[str, str]:
     return "payload", "cylinder"
 
 
+# What each fixed question actually determines. Without this the fallback plan labels a
+# payload mass as "fit" and fails the same validator the live plan has to satisfy.
+FIELD_AFFECTS = {
+    "filled_bottle_mass_kg": ("capacity", "sets the load the part must carry"),
+    "bottle_diameter_mm": ("fit", "sets the payload interface size"),
+    "desk_thickness_mm": ("capacity", "sets the clamp couple arm and the jaw reaction"),
+    "attachment_method": ("capacity", "decides how the load is reacted into the mount"),
+    "allowed_contact_region": ("envelope", "bounds where the part may touch the mount"),
+    "max_protrusion_mm": ("envelope", "bounds how far the part may extend"),
+    "manufacturing_method": ("manufacturing", "sets printable feature sizes"),
+}
+
+
 def plan_measurements(request_text: str) -> MeasurementPlan:
     description, kind = payload_kind_from_text(request_text)
     requests: List[MeasurementRequest] = []
     for field, question, priority in REQUIRED_FIELDS:
         if field == "bottle_diameter_mm":
             question = SIZE_QUESTIONS.get(kind, question)
+        affects, why = FIELD_AFFECTS.get(field, ("other", "required by the deterministic questionnaire"))
         requests.append(
             MeasurementRequest(
                 field=field,
                 question=question.format(payload=description),
                 unit=_unit_for(field),
-                why_it_matters="required by the deterministic questionnaire",
-                affects="fit",
+                why_it_matters=why,
+                affects=affects,
                 priority=priority,
             )
         )
@@ -68,10 +87,22 @@ def plan_measurements(request_text: str) -> MeasurementPlan:
 
 
 def assess_scope(request_text: str) -> ScopeAssessment:
-    lowered = (request_text or "").lower()
-    for pattern, reason in UNSUPPORTED_PATTERNS:
-        if pattern in lowered:
-            return ScopeAssessment(in_scope=False, hazard_class="other", reasons=[reason])
+    """The hazard FLOOR. Only an unambiguous hazard is refused here.
+
+    Ambiguous wording stays in scope at this layer so that live reasoning (or the user) can
+    settle it: a keyword must never be the thing that refuses "a laptop stand on my desk".
+    Because reasoning may restrict but not widen, deferring here is safe — the model can
+    still rule the request out, and an unresolved hazard is reported rather than assumed away.
+    """
+    signal = classify_hazard(request_text)
+    if signal.verdict == "refuse":
+        return ScopeAssessment(in_scope=False, hazard_class=signal.hazard_class, reasons=list(signal.reasons))
+    if signal.verdict == "ambiguous":
+        return ScopeAssessment(
+            in_scope=True,
+            hazard_class=signal.hazard_class,
+            reasons=list(signal.reasons) + [f"unresolved: {signal.question}"],
+        )
     return ScopeAssessment(in_scope=True, hazard_class="none", reasons=[])
 
 

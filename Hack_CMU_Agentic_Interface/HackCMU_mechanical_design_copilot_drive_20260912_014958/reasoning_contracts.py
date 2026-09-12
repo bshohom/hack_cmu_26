@@ -16,8 +16,10 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-# Units the deterministic layer knows how to handle.
-ALLOWED_UNITS = {"mm", "kg", "N", "deg", "mm2", "MPa", "none"}
+# Units the deterministic layer knows how to handle, and the field-name suffix each one
+# requires. The pairing is enforced so a quantity cannot be read downstream in the wrong unit.
+UNIT_SUFFIX = {"mm": "_mm", "kg": "_kg", "N": "_n", "deg": "_deg", "mm2": "_mm2", "MPa": "_mpa"}
+ALLOWED_UNITS = set(UNIT_SUFFIX) | {"none"}
 SAFETY_FACTOR_FLOOR = 2.0
 
 # What a measurement influences. Kept deliberately broad: a narrow taxonomy makes the model

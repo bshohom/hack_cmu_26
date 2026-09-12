@@ -1319,7 +1319,14 @@ with st.sidebar:
         "Reasoning Provider",
         REASONING_CHOICES,
         key="mode_reason",
-        help="Drives the engineering reasoning: what to measure, scope/hazard, how the load is reacted. Any structured provider can replace Grok.",
+        help="Selects which model answers structured reasoning calls. Any provider that "
+             "supports them can replace Grok.",
+    )
+    st.caption(
+        "Scope: warm-start geometry generation and scene observation. The typed reasoning "
+        "tasks (measurement planning, hazard assessment, mechanics) are implemented and "
+        "tested but **not yet called by the workflow** — questions and mechanics still come "
+        "from the deterministic tables."
     )
     st.checkbox(
         "Developer mode (block on reasoning failure)",
@@ -1337,7 +1344,10 @@ with st.sidebar:
             + ". Engineering decisions will use the deterministic tables."
         )
     elif st.session_state.get("developer_mode"):
-        st.caption("Developer mode: reasoning failures block and are reported in full below.")
+        st.caption(
+            "Developer mode: when a reasoning task runs, a failure blocks instead of falling "
+            "back, and the full trace is reported below."
+        )
     k2 = get_provider("k2_horizon")
     grok = get_provider("grok")
     cursor = get_provider("cursor")

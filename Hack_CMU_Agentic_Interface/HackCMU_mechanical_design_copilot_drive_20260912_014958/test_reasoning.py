@@ -10,6 +10,7 @@ import json
 import unittest
 
 import reasoning_deterministic as det
+from agents.interaction import classify_hazard
 from providers import MockReasoningProvider, ReasoningProvider
 from reasoning_contracts import (
     MeasurementPlan,
@@ -163,18 +164,79 @@ class SemanticValidatorTests(unittest.TestCase):
 
 
 class HazardFloorTests(unittest.TestCase):
-    def test_body_weight_without_the_obvious_words(self) -> None:
-        for request in ("a step to help my kid reach the sink",
-                        "something to stand on to reach a high shelf",
-                        "a footrest for under my desk"):
+    """The floor refuses only the unmistakable; ambiguous wording is deferred, never guessed.
+
+    A keyword must not be what refuses "a laptop stand on my desk", and a request that
+    carries a person must not pass merely because it avoided the word "stool".
+    """
+
+    def test_body_weight_however_it_is_worded(self) -> None:
+        for request in (
+            "a step stool for the kitchen",
+            "a footrest for under my desk",
+            "a grab bar for the shower",
+            "something that will hold my weight",
+            "a bracket I can sit on",
+            "something to stand on to reach a high shelf",
+            "a platform to stand on while painting",
+            "a step to help my kid reach the sink",          # no furniture noun at all
+            "a little platform so my toddler can reach the sink",
+            "Design a stool that supports a 100 kg person",
+        ):
+            self.assertEqual(classify_hazard(request).verdict, "refuse", request)
             self.assertFalse(det.assess_scope(request).in_scope, request)
 
-    def test_overhead_mounts_are_refused(self) -> None:
-        self.assertFalse(det.assess_scope("a hook in the garage ceiling for a bike").in_scope)
-
-    def test_ordinary_requests_pass(self) -> None:
-        for request in ("a desk hook for a 5 kg bag", "a wall rack for my keys"):
+    def test_ordinary_object_holders_are_not_refused(self) -> None:
+        """Paraphrases that previously tripped the substring list."""
+        for request in (
+            "a laptop stand on my desk",        # "stand on" as a noun
+            "a monitor stand on my desk",
+            "a rack that sits on the shelf",
+            "a workbench organizer",            # contains "bench"
+            "a rack for my kid's books",        # person word, no weight-bearing action
+            "a desk hook for a 5 kg bag",
+            "a wall rack for my keys",
+            "a cup holder that clamps to my desk",
+            "a stand for my phone",
+        ):
+            self.assertEqual(classify_hazard(request).verdict, "clear", request)
             self.assertTrue(det.assess_scope(request).in_scope, request)
+
+    def test_ambiguous_wording_is_deferred_with_a_question(self) -> None:
+        """Flagged for reasoning or the user — in scope at the floor, but not silently."""
+        for request, hazard in (
+            ("a hook in the garage ceiling for a bike", "overhead"),
+            ("a ceiling fan remote holder", "overhead"),
+            ("a holder for my impact driver", "impact"),
+        ):
+            signal = classify_hazard(request)
+            self.assertEqual(signal.verdict, "ambiguous", request)
+            self.assertEqual(signal.hazard_class, hazard, request)
+            self.assertTrue(signal.question, request)
+            assessment = det.assess_scope(request)
+            self.assertTrue(assessment.in_scope, request)
+            self.assertTrue(any("unresolved" in r for r in assessment.reasons), request)
+
+    def test_reasoning_may_still_refuse_a_deferred_request(self) -> None:
+        """Deferring is safe precisely because reasoning may restrict what the floor allowed."""
+        floor = det.assess_scope("a hook in the garage ceiling for a bike")
+        self.assertTrue(floor.in_scope)
+        validate_scope(ScopeAssessment(in_scope=False, hazard_class="overhead",
+                                       reasons=["overhead mount"]), floor)
+
+    def test_interaction_agent_rejects_hard_hazards_only(self) -> None:
+        from agents.interaction import InteractionAgent
+        from schemas import InteractionDecision
+
+        agent = InteractionAgent()
+        self.assertEqual(
+            agent.assess("a step stool for the kitchen").decision,
+            InteractionDecision.REJECT_OR_ESCALATE,
+        )
+        self.assertNotEqual(
+            agent.assess("a laptop stand on my desk").decision,
+            InteractionDecision.REJECT_OR_ESCALATE,
+        )
 
 
 if __name__ == "__main__":

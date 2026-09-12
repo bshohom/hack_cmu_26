@@ -34,6 +34,7 @@ from reasoning_contracts import (
     ReasoningTrace,
     SAFETY_FACTOR_FLOOR,
     ScopeAssessment,
+    UNIT_SUFFIX,
 )
 
 MAX_ATTEMPTS = 3
@@ -67,10 +68,13 @@ def validate_measurement_plan(plan: MeasurementPlan) -> None:
         seen.add(r.field)
         if r.unit not in ALLOWED_UNITS:
             raise SemanticError(f"unit {r.unit!r} for {r.field!r} must be one of {sorted(ALLOWED_UNITS)}")
-        if r.unit != "none" and not r.field.lower().endswith(("_mm", "_kg", "_n", "_deg", "_mm2", "_mpa")):
+        # The suffix must match THIS unit, not merely be some recognised suffix: otherwise
+        # `bicycle_mass_mm` with unit="kg" passes and a mass is read downstream as a length.
+        expected = UNIT_SUFFIX.get(r.unit)
+        if expected and not r.field.lower().endswith(expected):
             raise SemanticError(
-                f"field {r.field!r} carries unit {r.unit!r}, so its name must end with the matching "
-                "suffix (_mm, _kg, _n, _deg) to keep units unambiguous downstream"
+                f"field {r.field!r} carries unit {r.unit!r}, so its name must end with {expected!r} "
+                "to keep units unambiguous downstream"
             )
         # Category is metadata: normalise rather than burn a retry on taxonomy wording.
         affects = (r.affects or "").strip().lower().replace(" ", "_")
@@ -169,7 +173,17 @@ def call_reasoning(
             trace.outcome = ReasoningOutcome.BLOCKED
             return ReasoningCallResult(trace=trace, blocked=True, data=None)
         trace.outcome = ReasoningOutcome.FALLBACK
-        return ReasoningCallResult(trace=trace, blocked=False, data=fallback().model_dump(mode="json"))
+        # The fallback answers the same contract as the model: validate it too, or the
+        # deterministic path can emit something the rest of the pipeline rejects.
+        substitute = fallback()
+        if validate is not None:
+            try:
+                validate(substitute)
+            except Exception as exc:  # noqa: BLE001 — a broken fallback is a defect, report it
+                trace.reason = f"{reason}; the deterministic fallback is also invalid: {exc}"
+                trace.outcome = ReasoningOutcome.BLOCKED
+                return ReasoningCallResult(trace=trace, blocked=True, data=None)
+        return ReasoningCallResult(trace=trace, blocked=False, data=substitute.model_dump(mode="json"))
 
     if not getattr(provider, "configured", False):
         return settle(ReasoningFailureKind.NOT_CONFIGURED,
