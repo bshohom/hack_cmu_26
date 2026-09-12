@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import pytest
 
+from to_agent.contracts import BoxRegion, LoadCase
+from to_agent.integration.agent_regions import merge_load_cases
 from to_agent.integration.from_requirements import build_from_requirements
 
 BASE = {
@@ -37,6 +39,18 @@ def _input(**over) -> dict:
     ]
     data.update(over)
     return data
+
+
+def test_merge_keeps_retention_not_unmarked_template_loads():
+    box = BoxRegion(min=(0.0, 0.0, 0.0), max=(1.0, 1.0, 1.0))
+    agent = [LoadCase(id="static_gravity", region=box, force_N=(0.0, 0.0, -1.0), provenance="user")]
+    template = [
+        LoadCase(id="tip_retention", region=box, force_N=(1.0, 0.0, 0.0), role="retention"),
+        LoadCase(id="side_swing", region=box, force_N=(0.0, 1.0, 0.0)),
+    ]
+    merged, kept = merge_load_cases(agent, template)
+    assert [c.id for c in merged] == ["static_gravity", "tip_retention"]
+    assert [c.id for c in kept] == ["tip_retention"]
 
 
 def test_agent_regions_drive_supports_and_loads():

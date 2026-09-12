@@ -118,6 +118,27 @@ def supports_from_input(topology_input: dict, h: float) -> tuple[list[Support], 
     return supports, assumptions
 
 
+def merge_load_cases(
+    agent_cases: list[LoadCase], template_cases: list[LoadCase]
+) -> tuple[list[LoadCase], list[LoadCase]]:
+    """User/agent primary loads win; template retention/stabilization cases are kept.
+
+    Agent replacement used to drop every template case, including hook `tip_retention`
+    that exists to keep a preserved tip connected. side_swing and other unmarked
+    template cases are still discarded.
+    """
+    merged = list(agent_cases)
+    seen = {case.id for case in merged}
+    kept: list[LoadCase] = []
+    for case in template_cases:
+        if case.id in seen:
+            continue
+        if case.role == "retention":
+            merged.append(case)
+            kept.append(case)
+    return merged, kept
+
+
 def apply_agent_regions(problem, topology_input: dict, h: float) -> list[str]:
     """Override a template/candidate problem's boundary conditions with the agent's.
 
@@ -126,6 +147,7 @@ def apply_agent_regions(problem, topology_input: dict, h: float) -> list[str]:
     nothing, and every remaining template guess is recorded as an assumption.
     """
     notes: list[str] = []
+    template_loads = [case.model_copy(deep=True) for case in problem.load_cases]
     supports, sup_assumptions = supports_from_input(topology_input, h)
     if supports:
         problem.supports = supports
@@ -140,8 +162,13 @@ def apply_agent_regions(problem, topology_input: dict, h: float) -> list[str]:
         ]
     cases, load_assumptions = load_cases_from_input(topology_input, h)
     if cases:
-        problem.load_cases = cases
+        merged, kept = merge_load_cases(cases, template_loads)
+        problem.load_cases = merged
         notes.append(f"load cases from agent load_regions ({len(cases)})")
+        if kept:
+            notes.append(
+                "kept template retention loads (" + ", ".join(c.id for c in kept) + ")"
+            )
     else:
         problem.assumptions += load_assumptions or [
             Assumption(
@@ -210,6 +237,7 @@ def load_cases_from_input(topology_input: dict, h: float) -> tuple[list[LoadCase
                 region=patch_box(pos, normal, None, h),
                 force_N=force,
                 provenance="user",
+                role="primary",
             )
         )
     return cases, assumptions

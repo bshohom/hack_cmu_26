@@ -176,6 +176,9 @@ class LoadCase(BaseModel):
     force_N: Vec3  # total force; split equally over the nodes selected by `region`
     weight: float = 1.0
     provenance: Provenance | None = _PROVENANCE_FIELD
+    # primary: user/agent payload. retention: template stabilization that must
+    # stay when agent loads replace the primary set (e.g. tip_retention).
+    role: Literal["primary", "retention"] | None = None
 
 
 class TOProblem(BaseModel):

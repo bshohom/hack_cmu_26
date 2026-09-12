@@ -112,13 +112,12 @@ def hook_registration(dims_path: str | Path, points_path: str | Path) -> dict:
         return [x - tx, y, z - tz]
 
     seat_x = 0.5 * (geometry.x_seat[0] + geometry.x_seat[1])
+    clamp_x = 0.5 * (geometry.x_min + geometry.x_back_in)
     named = {
         "strap_seat": to_desk(seat_x, 0.0, geometry.z_seat),
-        "mount_contact": to_desk(
-            0.5 * (geometry.x_min + geometry.x_back_in),
-            0.0,
-            0.5 * (geometry.z_rib_lo + geometry.z_rib_hi),
-        ),
+        # Desk-underside jaw face (z=0 in desk_edge_frame), not the mid-slab gap.
+        "mount_contact": to_desk(clamp_x, 0.0, geometry.z_rib_lo),
+        "mount_contact_top": to_desk(clamp_x, 0.0, geometry.z_rib_hi),
     }
     return {
         "from_frame": "desk_edge_frame",
@@ -133,6 +132,53 @@ def hook_registration(dims_path: str | Path, points_path: str | Path) -> dict:
         "landmarks_desk_edge_frame": named,
         "named_regions": named,
     }
+
+
+def measured_clamp_supports(g: HookGeometry, h: float) -> list[Support]:
+    """Jaw-face supports on the measured rib planes, not a patch through the desk slab."""
+    return [
+        Support(
+            id="mount_contact",
+            region=BoxRegion(
+                min=(g.x_min + 2, -g.half_w, g.z_rib_lo - h),
+                max=(g.x_back_in - 2, g.half_w, g.z_rib_lo),
+            ),
+            provenance="derived",
+        ),
+        Support(
+            id="mount_contact_top",
+            region=BoxRegion(
+                min=(g.x_min + 2, -g.half_w, g.z_rib_hi),
+                max=(g.x_back_in - 2, g.half_w, g.z_rib_hi + h),
+            ),
+            provenance="derived",
+        ),
+    ]
+
+
+def measured_seat_box(g: HookGeometry, h: float) -> BoxRegion:
+    """Strap seat volume: into the arm (z_seat - h) up to the measured opening (z_seat + 1)."""
+    return BoxRegion(
+        min=(g.x_seat[0], -g.hook_half_w, g.z_seat - h),
+        max=(g.x_seat[1], g.hook_half_w, g.z_seat + 1.0),
+    )
+
+
+def reconcile_hook_boundary_conditions(problem: TOProblem, geometry: HookGeometry, h: float) -> list[str]:
+    """Replace the agent mid-slab / centered-surface patches with measured clamp and seat boxes.
+
+    Agent force magnitudes and ids stay. Geometry comes from measure_hook, not invented offsets.
+    """
+    notes = [
+        "mount_contact reconciled to measured clamp faces (z_rib_lo / z_rib_hi)",
+        "static_gravity region reconciled to measured strap-seat box",
+    ]
+    problem.supports = measured_clamp_supports(geometry, h)
+    seat = measured_seat_box(geometry, h)
+    for case in problem.load_cases:
+        if case.id == "static_gravity":
+            case.region = seat
+    return notes
 
 
 def build_hook_problem(
@@ -176,10 +222,17 @@ def build_hook_problem(
         ],
         load_cases=[
             # Strap weight, distributed over the whole horizontal arm it rests on.
-            LoadCase(id="static_gravity", region=BoxRegion(min=(g.x_seat[0], -g.hook_half_w, g.z_seat - h), max=(g.x_seat[1], g.hook_half_w, g.z_seat + 1.0)), force_N=(0.0, 0.0, -9.81 * mass), confidence=ASSUMED),
+            LoadCase(id="static_gravity", region=BoxRegion(min=(g.x_seat[0], -g.hook_half_w, g.z_seat - h), max=(g.x_seat[1], g.hook_half_w, g.z_seat + 1.0)), force_N=(0.0, 0.0, -9.81 * mass), confidence=ASSUMED, role="primary"),
             # Strap pulling outward against the tip: this is what makes the tip load-bearing
             # (preserved-but-unloaded geometry gets disconnected by the optimizer).
-            LoadCase(id="tip_retention", region=BoxRegion(min=(g.x_tip[0] - 1.0, -g.hook_half_w, g.z_seat - h), max=(g.x_tip[1], g.hook_half_w, g.z_tip_top)), force_N=(0.4 * 9.81 * mass, 0.0, 0.0), weight=1.0, confidence=ASSUMED),
+            LoadCase(
+                id="tip_retention",
+                region=BoxRegion(min=(g.x_tip[0] - 1.0, -g.hook_half_w, g.z_seat - h), max=(g.x_tip[1], g.hook_half_w, g.z_tip_top)),
+                force_N=(0.4 * 9.81 * mass, 0.0, 0.0),
+                weight=1.0,
+                confidence=ASSUMED,
+                role="retention",
+            ),
             LoadCase(id="side_swing", region=BoxRegion(min=(g.x_seat[0], -g.hook_half_w, g.z_seat - h), max=(g.x_seat[1], g.hook_half_w, g.z_seat + 1.0)), force_N=(0.0, 0.3 * 9.81 * mass, 0.0), weight=0.5, confidence=ASSUMED),
         ],
         safety_factor=safety_factor,

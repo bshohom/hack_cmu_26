@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -35,9 +34,14 @@ def build_masks(problem: TOProblem, mesh: HexMesh) -> Masks:
     cen = mesh.centroids
     void = contains_any(problem.void, cen)
     preserve_raw = contains_any(problem.preserve, cen)
-    overlap = int(np.sum(void & preserve_raw))
-    if overlap:
-        warnings.warn(f"{overlap} elements are both preserve and void; void wins", stacklevel=2)
+    overlap_mask = void & preserve_raw
+    # Required BCs are nodal; they are not on problem.preserve. Overlap here is
+    # optional candidate skins (jaws, seat, tip) clipped by keep-out / envelope.
+    required = np.zeros(len(cen), dtype=bool)
+    for item in (*problem.supports, *problem.load_cases):
+        required |= contains(item.region, cen)
+    optional_clip = overlap_mask & ~required
+    required_clip = overlap_mask & required
     preserve = preserve_raw & ~void
     design = ~void & ~preserve
     warm = contains_any(problem.warm_start, cen) & design
@@ -76,6 +80,8 @@ def build_masks(problem: TOProblem, mesh: HexMesh) -> Masks:
         forces.append(F)
         weights.append(float(lc.weight))
 
+    optional_n = int(optional_clip.sum())
+    required_n = int(required_clip.sum())
     report = {
         "n_elem": mesh.n_elem,
         "n_nodes": mesh.n_nodes,
@@ -90,5 +96,7 @@ def build_masks(problem: TOProblem, mesh: HexMesh) -> Masks:
         "support_nodes": support_counts,
         "load_nodes": load_counts,
         "safety_factor": problem.safety_factor,
+        "optional_candidate_clipped_by_keepout": optional_n,
+        "required_preserve_clipped_by_keepout": required_n,
     }
     return Masks(design, preserve, void, warm, constraints, forces, weights, report)

@@ -147,13 +147,16 @@ def _hook_agent_input() -> dict:
 
 
 def test_hook_agent_loads_override_template():
-    """Matching strap_seat names: agent load is accepted; template cases are discarded."""
+    """Agent primary load is accepted; unmarked template cases drop; tip_retention is kept."""
     data = _hook_agent_input()
     problem, report = build_from_registry(data["candidate"], data, 8.0, 0.4, 2.5)
     assert "load cases from agent load_regions (1)" in report["region_source"]
-    assert [c.id for c in problem.load_cases] == ["static_gravity"]
+    assert "kept template retention loads (tip_retention)" in report["region_source"]
+    assert [c.id for c in problem.load_cases] == ["static_gravity", "tip_retention"]
     assert problem.load_cases[0].provenance == "user"
-    assert {c.id for c in problem.load_cases}.isdisjoint({"tip_retention", "side_swing"})
+    assert problem.load_cases[0].role == "primary"
+    assert problem.load_cases[1].role == "retention"
+    assert "side_swing" not in {c.id for c in problem.load_cases}
     assert not any(a.field == "load_cases" for a in problem.assumptions)
     assert problem.volume_fraction == pytest.approx(0.4)
     assert report["registration"]["matrix"][0][3] == pytest.approx(-0.25, abs=0.05)
@@ -193,12 +196,13 @@ def test_imported_candidate_load_position_comes_from_metadata_not_geometry_agent
 
     seat_mesh = transform_point(spec["matrix"], seat_desk)
     hang_mesh = transform_point(spec["matrix"], [82.5, 0.0, -25.0])
-    box = problem.load_cases[0].region
+    box = next(c.region for c in problem.load_cases if c.id == "static_gravity")
     cx = 0.5 * (box.min[0] + box.max[0])
-    cz = 0.5 * (box.min[2] + box.max[2])
     assert cx == pytest.approx(seat_mesh[0], abs=1.0)
-    assert cz == pytest.approx(seat_mesh[2], abs=1.0)
-    assert cz != pytest.approx(hang_mesh[2], abs=5.0)
+    # Measured seat box: into the arm up to the opening at z_seat+1, not the conceptual hang.
+    assert box.min[2] < seat_mesh[2]
+    assert box.max[2] == pytest.approx(seat_mesh[2] + 1.0, abs=0.05)
+    assert abs(0.5 * (box.min[2] + box.max[2]) - hang_mesh[2]) > 15.0
 
     mesh, masks = prepare(problem)
     assert masks.report["load_nodes"]["static_gravity"] > 0
@@ -399,6 +403,88 @@ def test_hook_registration_live(tmp_path):
     assert out["volume_fraction_override_reason"] is None
     assert problem.load_cases[0].provenance == "user"
     assert report["registration"]["from_frame"] == "desk_edge_frame"
+    assert {c.id for c in problem.load_cases} >= {"static_gravity", "tip_retention"}
+    assert "mount_contact" in masks.report["support_nodes"]
+    assert "mount_contact_top" in {s.id for s in problem.supports}
+    bc = out["acceptance"].get("bc_validation") or masks.report["bc_validation"]
+    assert bc["hard_infeasible"] is False
+    assert all(r["usable_nodes"] > 0 for r in bc["regions"])
+    assert out["acceptance"]["optional_candidate_clipped_by_keepout"] == masks.report["optional_candidate_clipped_by_keepout"]
+
+
+def test_hook_mount_landmark_is_underside_not_mid_gap():
+    spec = hook_registration(HOOK_CANDIDATE["dimensions_path"], HOOK_CANDIDATE["particle_path"])
+    mount = spec["landmarks_desk_edge_frame"]["mount_contact"]
+    top = spec["landmarks_desk_edge_frame"]["mount_contact_top"]
+    assert mount[2] == pytest.approx(0.0, abs=0.05)
+    assert top[2] == pytest.approx(18.2, abs=0.3)
+
+
+def test_hook_required_bcs_sit_on_measured_keepout_faces():
+    """Jaw supports and seat load are measured surfaces, not the mid-slab / opening patch."""
+    import warnings
+
+    from to_agent.integration.run import prepare
+
+    data = _hook_agent_input()
+    problem, report = build_from_registry(data["candidate"], data, 4.0, 0.4, 2.5)
+    g = report["hook"]
+    bot = next(s for s in problem.supports if s.id == "mount_contact")
+    top = next(s for s in problem.supports if s.id == "mount_contact_top")
+    assert bot.region.max[2] == pytest.approx(g["z_rib_lo"], abs=0.05)
+    assert bot.region.min[2] < g["z_rib_lo"]
+    assert top.region.min[2] == pytest.approx(g["z_rib_hi"], abs=0.05)
+    seat = next(c.region for c in problem.load_cases if c.id == "static_gravity")
+    assert seat.max[2] == pytest.approx(g["z_seat"] + 1.0, abs=0.05)
+
+    apply_envelope_constraint(problem, data, report["registration"]["matrix"])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mesh, masks = prepare(problem)
+    del mesh
+    assert not any("void wins" in str(w.message) for w in caught)
+    assert masks.report["optional_candidate_clipped_by_keepout"] >= 0
+    bc = masks.report["bc_validation"]
+    assert bc["hard_infeasible"] is False
+    by_id = {r["id"]: r for r in bc["regions"]}
+    assert by_id["mount_contact"]["usable_nodes"] > 0
+    assert by_id["static_gravity"]["usable_nodes"] > 0
+    assert by_id["tip_retention"]["usable_nodes"] > 0
+    assert by_id["mount_contact"]["usable_fraction"] >= 0.5
+    assert by_id["static_gravity"]["usable_fraction"] >= 0.5
+    assert by_id["static_gravity"]["status"] in {"ok", "partial"}
+
+
+def test_bc_validation_hard_when_region_has_no_nonvoid_nodes():
+    from to_agent.integration.bc_validation import validate_required_bcs
+    from to_agent.integration.run import prepare
+    from to_agent.meshing.masks import ProblemSetupError
+
+    domain = BoxRegion(min=(0.0, 0.0, 0.0), max=(16.0, 8.0, 8.0))
+    voided = BoxRegion(min=(0.0, 0.0, 0.0), max=(8.0, 8.0, 8.0))
+    dead = BoxRegion(min=(0.0, 0.0, 0.0), max=(2.0, 2.0, 2.0))
+    live = BoxRegion(min=(12.0, 0.0, 0.0), max=(16.0, 8.0, 8.0))
+    problem = TOProblem(
+        design_domain=domain,
+        void=[voided],
+        supports=[Support(id="dead", region=dead), Support(id="live", region=live)],
+        load_cases=[LoadCase(id="l", region=live, force_N=(0.0, 0.0, -1.0))],
+        target_element_size=4.0,
+    )
+    with pytest.raises(ProblemSetupError, match="hard infeasible"):
+        prepare(problem)
+    from to_agent.meshing.masks import build_masks
+    from to_agent.meshing.voxel_backend import build_hex_grid
+    from to_agent.regions import resolve_domain
+
+    mesh = build_hex_grid(resolve_domain(problem), 4.0)
+    masks = build_masks(problem, mesh)
+    bc = validate_required_bcs(problem, mesh, masks.void)
+    assert bc["hard_infeasible"] is True
+    gone = next(r for r in bc["regions"] if r["id"] == "dead")
+    assert gone["status"] == "hard_infeasible"
+    assert gone["usable_nodes"] == 0
+    assert gone["requested_nodes"] > 0
 
 
 def test_envelope_voids_design_elements_outside_user_box():
