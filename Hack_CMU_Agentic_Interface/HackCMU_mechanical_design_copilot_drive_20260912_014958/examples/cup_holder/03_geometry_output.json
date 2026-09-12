@@ -1,0 +1,47 @@
+{
+  "is_mock": true,
+  "coordinate_frame": "desk_edge_frame",
+  "environment": {
+    "kind": "desk_plane",
+    "desk_thickness_mm": 25.0,
+    "surface_normal": [0.0, 0.0, 1.0]
+  },
+  "payload_object": {
+    "kind": "cylinder",
+    "bottle_diameter_mm": 85.0,
+    "bottle_height_mm": 250.0,
+    "filled_mass_kg": 1.1
+  },
+  "design_envelope": {
+    "max_protrusion_mm": 130.0,
+    "max_width_mm": 136.0,
+    "max_height_mm": 125.0
+  },
+  "part": {
+    "shape": "edge_clamp_cantilever_ring",
+    "length_mm": 130.0,
+    "width_mm": 136.0,
+    "height_mm": 45.0,
+    "volume_mm3": 145000.0,
+    "estimated_mass_kg": 0.18
+  },
+  "material": "PLA",
+  "attachment_regions": [
+    {
+      "name": "desk_edge_clamp_jaws",
+      "position_mm": [0.0, 0.0, 12.5],
+      "normal": [1.0, 0.0, 0.0],
+      "area_mm2": 3400.0,
+      "notes": "Yujie mock: clamp contact on desk front edge, no drilling"
+    }
+  ],
+  "load_regions": [
+    {
+      "name": "cup_cavity",
+      "position_mm": [110.5, 0.0, 35.0],
+      "direction": [0.0, 0.0, -1.0],
+      "notes": "Yujie mock: bottle weight applied in cup ring/base"
+    }
+  ],
+  "notes": "Yujie mock: desk plane + cylinder payload + clamp contact + cup cavity. Not reconstructed from a scan."
+}

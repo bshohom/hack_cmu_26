@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "to-agent"
+version = "0.1.0"
+description = "Agent-facing 3D topology optimization toolkit built on torch-fem"
+requires-python = ">=3.10"
+dependencies = [
+  # Install torch first from the CUDA index (see README).
+  "torch>=2.0",
+  # torch-fem brings numpy, scipy, meshio, pyvista, matplotlib, pyamg.
+  "torch-fem==0.11.0",
+  "trimesh>=4.0",
+  "rtree",          # spatial index used by trimesh.contains / proximity
+  "pydantic>=2",
+  "pyyaml",
+  "typer",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+to-agent = "to_agent.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["to_agent*"]
+
+[tool.ruff]
+line-length = 100

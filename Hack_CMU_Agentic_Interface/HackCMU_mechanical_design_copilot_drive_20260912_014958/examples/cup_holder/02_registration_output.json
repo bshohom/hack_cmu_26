@@ -1,0 +1,12 @@
+{
+  "is_mock": true,
+  "frame_id": "desk_edge_frame",
+  "origin_mm": [0.0, 0.0, 0.0],
+  "x_axis": [1.0, 0.0, 0.0],
+  "y_axis": [0.0, 1.0, 0.0],
+  "z_axis": [0.0, 0.0, 1.0],
+  "desk_plane_point_mm": [0.0, 0.0, 25.0],
+  "desk_plane_normal": [0.0, 0.0, 1.0],
+  "confidence": 0.86,
+  "notes": "Aman mock: desk-edge frame with +X out from the desk and +Z up. Not a real registration result."
+}

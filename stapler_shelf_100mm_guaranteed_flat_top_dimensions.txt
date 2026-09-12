@@ -1,0 +1,24 @@
+Stapler shelf - guaranteed flat top
+Units: mm
+
+Lift height: 100.0
+Platform length: 120.0
+Platform width: 70.0
+Platform thickness: 6.0
+Platform underside: Z=94.0
+Platform top: Z=100.0
+
+Top-surface construction:
+- planar extrusion in Z
+- no 3D rounded-box top
+- no lips
+- no top ribs
+- support clipped to Z <= 94.6 mm
+- visible top vertices snapped to exactly Z=100 mm
+
+Mesh:
+- vertices: 130620
+- faces: 261268
+- watertight: True
+- connected components: 1
+- verified top Z values: [100.0]

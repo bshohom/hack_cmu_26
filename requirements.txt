@@ -1,0 +1,16 @@
+# Core runtime dependencies for to_agent.
+# Install torch first from the CUDA 12.8 index so the RTX 5080 (sm_120) build is used:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+# then:
+#   pip install -r requirements.txt
+torch>=2.0
+torch-fem==0.11.0     # pulls numpy, scipy, meshio, pyvista, matplotlib, pyamg
+trimesh>=4.0
+rtree                 # spatial index for trimesh.contains / proximity queries
+pydantic>=2
+pyyaml
+typer
+
+# development
+pytest
+ruff

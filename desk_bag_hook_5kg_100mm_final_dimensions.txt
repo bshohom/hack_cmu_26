@@ -1,0 +1,30 @@
+Desk bag hook — geometry based on latest approved concept
+Units: mm
+
+DESIGN DIMENSIONS
+- Desk thickness reference: 20.0
+- Clamp internal gap: 22.0
+- Top arm length: 60.0
+- Bottom arm length: 60.0
+- Top/bottom arm thickness: 10.0
+- Clamp/back-plate overall width: 50.0
+- Hook arm width: 20.0
+- Back plate thickness: 12.0
+- Desk face to hook centerline: 100.0
+- Hook opening: 30.0
+- Horizontal hook-arm thickness: 12.0
+- Hook-tip thickness: 14.0
+
+NOTES
+- One-piece geometry
+- No screws, glue, or separate pads
+- Integrated contact ribs are part of the printed body
+- Structural diagonal gussets included
+- Nominal concept target load: 5 kg static
+- Actual 5 kg capacity should be verified by FEA and physical testing for the chosen PLA, print orientation, infill, and layer settings.
+
+MESH
+- Vertices: 72000
+- Faces: 144000
+- Watertight: True
+- Connected components: 1

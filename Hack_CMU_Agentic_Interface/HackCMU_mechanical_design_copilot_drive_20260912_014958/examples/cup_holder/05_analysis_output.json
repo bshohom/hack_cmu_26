@@ -1,0 +1,13 @@
+{
+  "load_case_id": "static_gravity",
+  "load_force_N": [0.0, 0.0, -10.791],
+  "is_mock": true,
+  "max_displacement_mm": 0.42,
+  "max_stress_pa": 4800000.0,
+  "factor_of_safety": 4.2,
+  "reaction_forces_N": [[0.0, 0.0, 10.791]],
+  "is_safety_validation": false,
+  "solver": "mock-fem-simulated-fixture",
+  "solver_status": "simulated_only",
+  "disclaimer": "SIMULATED placeholder results. Not real FEM. Do not treat as engineering validation."
+}

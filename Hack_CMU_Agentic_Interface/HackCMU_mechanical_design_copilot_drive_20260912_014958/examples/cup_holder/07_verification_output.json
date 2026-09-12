@@ -1,0 +1,7 @@
+{
+  "artifacts_complete": true,
+  "analysis_is_mock": true,
+  "topology_is_mock": true,
+  "safety_validated": false,
+  "notes": "engineering validation: UNVERIFIED. reason: mock analysis data; mock topology data. COMPLETE means artifacts exist, not physical safety. NOT validated for physical use."
+}

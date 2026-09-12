@@ -1,0 +1,16 @@
+Units: mm
+Inner diameter: 70.0
+Outer diameter: 80.0
+Holder height: 60.0
+Wall thickness: 5.0
+Base thickness: 5.0
+Arm width: 45.0
+Top plate thickness: 8.0
+Nominal desk gap: 30.0
+Compatible desk range from concept: 20–35
+Lower hook thickness: 8.0
+Clamp reach: 45.0
+Vertices: 38032
+Faces: 76068
+Watertight: True
+Connected components: 1

@@ -1,0 +1,13 @@
+{
+  "filled_bottle_mass_kg": 1.1,
+  "bottle_diameter_mm": 85.0,
+  "bottle_height_mm": 250.0,
+  "desk_thickness_mm": 25.0,
+  "attachment_method": "clamp",
+  "allowed_contact_region": "desk_front_edge",
+  "attachment_notes": "clamp only, no drilling",
+  "max_protrusion_mm": 130.0,
+  "manufacturing_method": "3d_print",
+  "material": "PLA",
+  "max_part_mass_kg": 0.3
+}

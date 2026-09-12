@@ -1,0 +1,11 @@
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+out/
+.venv/
+.env
+.streamlit/secrets.toml
+.aider*
+# Aman's CV pipeline is its own git repository
+HackCMU/

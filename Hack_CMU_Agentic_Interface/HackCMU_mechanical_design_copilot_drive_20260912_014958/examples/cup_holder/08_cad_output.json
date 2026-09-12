@@ -1,0 +1,6 @@
+{
+  "is_mock": true,
+  "format": "stl",
+  "filename": "cup_holder_prototype.stl",
+  "notes": "Placeholder CAD export from structured topology/geometry. Mesh vertices are not LLM-generated. Fixture only."
+}

@@ -1,0 +1,9 @@
+{
+  "is_mock": true,
+  "compliance": 0.82,
+  "volume_fraction": 0.35,
+  "mass_reduction_pct": 35.0,
+  "optimized_geometry_ref": "mock://shohom/cup_holder_density_field",
+  "solver_status": "mock_converged",
+  "model": "shohom-surrogate-fixture"
+}

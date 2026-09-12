@@ -1,0 +1,94 @@
+[
+  {
+    "stage_executed": "requirements",
+    "next_stage": "request_information",
+    "component": "InteractionAgent",
+    "action": "ingest_user_request",
+    "decision": "request_information",
+    "fields_changed": [
+      "stage",
+      "interaction_decision",
+      "requirements",
+      "missing_information"
+    ],
+    "notes": ""
+  },
+  {
+    "stage_executed": "request_information",
+    "next_stage": "geometry",
+    "component": "InteractionAgent",
+    "action": "apply_answers",
+    "decision": "proceed",
+    "fields_changed": [
+      "stage",
+      "interaction_decision",
+      "requirements",
+      "missing_information"
+    ],
+    "notes": ""
+  },
+  {
+    "stage_executed": "geometry",
+    "next_stage": "structure",
+    "component": "Yujie fixture",
+    "action": "load_geometry",
+    "decision": "proceed",
+    "fields_changed": [
+      "stage",
+      "registration",
+      "geometry"
+    ],
+    "notes": "loaded Yujie mock fixture"
+  },
+  {
+    "stage_executed": "structure",
+    "next_stage": "analysis",
+    "component": "StructureAgent",
+    "action": "run_structure",
+    "decision": "proceed",
+    "fields_changed": [
+      "stage",
+      "structure",
+      "resolved_payload_mass"
+    ],
+    "notes": "generated 4 nodes / 5 members"
+  },
+  {
+    "stage_executed": "analysis",
+    "next_stage": "topology_optimization",
+    "component": "analysis fixture",
+    "action": "load_analysis",
+    "decision": "proceed",
+    "fields_changed": [
+      "stage",
+      "safety_status",
+      "analysis"
+    ],
+    "notes": "MOCK RESULT"
+  },
+  {
+    "stage_executed": "topology_optimization",
+    "next_stage": "verification",
+    "component": "Shohom fixture",
+    "action": "load_topology",
+    "decision": "proceed",
+    "fields_changed": [
+      "stage",
+      "topology"
+    ],
+    "notes": "loaded Shohom mock fixture"
+  },
+  {
+    "stage_executed": "verification",
+    "next_stage": "complete",
+    "component": "verification",
+    "action": "run_verification",
+    "decision": "proceed",
+    "fields_changed": [
+      "stage",
+      "cad",
+      "verification"
+    ],
+    "notes": "artifacts complete; safety UNVERIFIED"
+  }
+]

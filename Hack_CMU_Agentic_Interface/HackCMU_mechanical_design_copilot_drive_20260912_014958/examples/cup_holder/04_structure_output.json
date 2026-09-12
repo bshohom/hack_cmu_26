@@ -1,0 +1,162 @@
+{
+  "concept": "desk-edge clamp with upper arm, lower arm, and brace",
+  "nodes": [
+    {
+      "id": "mount_upper",
+      "position_mm": [
+        0.0,
+        0.0,
+        25.0
+      ],
+      "role": "anchor"
+    },
+    {
+      "id": "mount_lower",
+      "position_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "role": "anchor"
+    },
+    {
+      "id": "cup_ring",
+      "position_mm": [
+        130.0,
+        0.0,
+        25.0
+      ],
+      "role": "load"
+    },
+    {
+      "id": "cup_base",
+      "position_mm": [
+        130.0,
+        0.0,
+        7.5
+      ],
+      "role": "load"
+    }
+  ],
+  "members": [
+    {
+      "id": "upper_arm",
+      "start_node_id": "mount_upper",
+      "end_node_id": "cup_ring",
+      "kind": "beam",
+      "notes": "mount_upper -> cup_ring"
+    },
+    {
+      "id": "lower_arm",
+      "start_node_id": "mount_lower",
+      "end_node_id": "cup_base",
+      "kind": "beam",
+      "notes": "mount_lower -> cup_base"
+    },
+    {
+      "id": "brace",
+      "start_node_id": "mount_lower",
+      "end_node_id": "cup_ring",
+      "kind": "beam",
+      "notes": "brace between mount_lower and cup_ring"
+    },
+    {
+      "id": "cup_wall",
+      "start_node_id": "cup_ring",
+      "end_node_id": "cup_base",
+      "kind": "beam",
+      "notes": "cup ring to cup base"
+    },
+    {
+      "id": "inner_brace",
+      "start_node_id": "mount_upper",
+      "end_node_id": "cup_base",
+      "kind": "beam",
+      "notes": "mount_upper -> cup_base"
+    }
+  ],
+  "attachment_regions": [
+    {
+      "name": "desk_edge_clamp_jaws",
+      "position_mm": [
+        0.0,
+        0.0,
+        12.5
+      ],
+      "normal": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "area_mm2": 3400.0,
+      "notes": "Yujie mock: clamp contact on desk front edge, no drilling"
+    }
+  ],
+  "load_regions": [
+    {
+      "name": "cup_cavity",
+      "position_mm": [
+        110.5,
+        0.0,
+        35.0
+      ],
+      "direction": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "notes": "Yujie mock: bottle weight applied in cup ring/base"
+    }
+  ],
+  "boundary_conditions": [
+    {
+      "node_id": "mount_upper",
+      "constrained_dof": [
+        "ux",
+        "uy",
+        "uz",
+        "rx",
+        "ry",
+        "rz"
+      ],
+      "notes": "fixed to desk top"
+    },
+    {
+      "node_id": "mount_lower",
+      "constrained_dof": [
+        "ux",
+        "uy",
+        "uz",
+        "rx",
+        "ry",
+        "rz"
+      ],
+      "notes": "fixed to desk underside"
+    }
+  ],
+  "load_paths": [
+    {
+      "name": "primary",
+      "node_ids": [
+        "cup_ring",
+        "cup_base",
+        "mount_upper",
+        "mount_lower"
+      ],
+      "description": "bottle -> cup_ring/cup_base -> arms/brace -> mount_upper/mount_lower -> desk"
+    }
+  ],
+  "load_cases": [
+    {
+      "load_case_id": "static_gravity",
+      "name": "static_gravity",
+      "region_name": "cup_cavity",
+      "force_N": [
+        0.0,
+        0.0,
+        -10.791000000000002
+      ],
+      "notes": "quasi-static gravity from payload.filled_mass_kg=1.1 kg (provenance=geometry_output, not part mass)"
+    }
+  ]
+}
