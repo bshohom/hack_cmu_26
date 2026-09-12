@@ -69,7 +69,11 @@ def test_cupholder_live(tmp_path):
     assert Path(out["optimized_geometry_ref"]).exists()
     assert out["iterations"] == 2
     assert out["compliance"] > 0
-    assert "requested volume fraction 0.4" in out["notes"]
+    # A requirement that could not be applied is reported as structured data the UI can
+    # render, not as a sentence buried in the notes string.
+    unsupported = {u["requirement"]: u for u in out["unsupported_requirements"]}
+    assert unsupported["target_volume_fraction"]["requested"] == 0.4
+    assert unsupported["target_volume_fraction"]["applied"] == pytest.approx(out["volume_fraction"], abs=0.2)
     assert 0 < out["volume_fraction"] < 1
     pc = out["post_check"]
     assert pc is not None and pc["is_mock"] is False and pc["is_safety_validation"] is False

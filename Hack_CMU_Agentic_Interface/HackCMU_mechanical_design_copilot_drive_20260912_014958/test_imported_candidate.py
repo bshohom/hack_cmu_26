@@ -140,3 +140,51 @@ class ImportedCandidateAdapterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnknownFitTests(unittest.TestCase):
+    """Missing evidence must read as unknown, never as a successful fit.
+
+    The audit reproduced fits=true with all three checks marked n/a, followed by the
+    message "fits the resolved user requirements". Every generated warm start hit this,
+    because warmstart.py never populates the four fields the checks read.
+    """
+
+    def _candidate(self, **over):
+        from schemas import ImportedCandidateGeometry
+
+        data = {"mesh_path": "/tmp/x.stl", "candidate_name": "generated", "task": "generated"}
+        data.update(over)
+        return ImportedCandidateGeometry(**data)
+
+    def test_all_checks_na_is_not_a_fit(self) -> None:
+        result = check_candidate_fit(UserRequirements(), self._candidate())
+        self.assertTrue(all(c.status == CandidateFitStatus.NA for c in result.checks))
+        self.assertFalse(result.fits)
+        self.assertIn("UNKNOWN", result.message)
+        self.assertNotIn("fits the resolved user requirements", result.message)
+
+    def test_unknown_checks_produce_answerable_questions(self) -> None:
+        from imported_candidate import candidate_fit_questions
+
+        result = check_candidate_fit(UserRequirements(), self._candidate())
+        fields = {q.field for q in candidate_fit_questions(result)}
+        self.assertEqual(
+            fields, {"bottle_diameter_mm", "desk_thickness_mm", "max_protrusion_mm"}
+        )
+
+    def test_fully_checked_candidate_still_passes(self) -> None:
+        req = UserRequirements()
+        req.object_geometry.bottle_diameter_mm = 70.0
+        req.environment.desk_thickness_mm = 25.0
+        req.design_envelope.max_protrusion_mm = 120.0
+        candidate = self._candidate(
+            inner_diameter_mm=75.0,
+            compatible_desk_min_mm=18.0,
+            compatible_desk_max_mm=40.0,
+            clamp_reach_mm=100.0,
+        )
+        result = check_candidate_fit(req, candidate)
+        self.assertTrue(result.fits, result.message)
+        # and it does not overclaim what was actually verified
+        self.assertIn("not checked", result.message)

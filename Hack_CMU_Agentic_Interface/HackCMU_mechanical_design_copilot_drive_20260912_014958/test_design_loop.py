@@ -155,7 +155,11 @@ class DesignLoopTests(unittest.TestCase):
         self.assertAlmostEqual(analysis.max_displacement_mm, 8.0)
         self.assertTrue(analysis.is_mock)
         self.assertFalse(analysis.is_safety_validation)
-        self.assertIn("DETERMINISTIC MOCK RESPONSE FOR LOOP TESTING", analysis.disclaimer)
+        # The loop still sizes the seed geometry, but it no longer presents itself as
+        # analysis and no longer has authority to accept or reject a design.
+        self.assertIn("SEED-SIZING HEURISTIC, NOT ANALYSIS", analysis.disclaimer)
+        self.assertIn("cannot accept or reject a design", analysis.disclaimer)
+        self.assertEqual(analysis.solver, "seed-sizing-heuristic")
 
 
 if __name__ == "__main__":

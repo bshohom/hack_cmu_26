@@ -398,12 +398,27 @@ def check_candidate_fit(
         )
 
     failed = [check for check in checks if check.status == CandidateFitStatus.FAIL]
-    fits = not failed
+    unknown = [check for check in checks if check.status == CandidateFitStatus.NA]
+    # "No failed checks" is not the same as "checks passed". A candidate whose three checks
+    # all returned n/a used to report that it fits the resolved requirements, having
+    # verified nothing at all.
+    fits = bool(checks) and not failed and not unknown
     if fits:
-        message = "Imported candidate geometry fits the resolved user requirements."
-    else:
+        message = (
+            "Imported candidate geometry passes the checks that could be run "
+            f"({', '.join(c.name for c in checks)}). These cover payload diameter, desk "
+            "clamp range and protrusion only; retention, usability and assembly clearance "
+            "are not checked."
+        )
+    elif failed:
         details = "; ".join(check.message for check in failed if check.message)
         message = "CANDIDATE GEOMETRY REJECTED. " + details
+    else:
+        names = ", ".join(check.name for check in unknown)
+        message = (
+            f"CANDIDATE FIT UNKNOWN. Not verified: {names}. Missing dimensions were not "
+            "invented, so the candidate is not accepted on the strength of unrun checks."
+        )
     return CandidateFitResult(fits=fits, checks=checks, message=message)
 
 
@@ -437,6 +452,34 @@ def candidate_fit_questions(result: CandidateFitResult) -> List[ClarificationQue
                 priority="high",
             )
         )
+    # An n/a check blocks acceptance, so it has to be answerable: ask for the missing
+    # number instead of leaving the run stuck behind a check that can never resolve.
+    _UNKNOWN_PROMPTS = {
+        "payload_fit": (
+            "bottle_diameter_mm",
+            "Payload fit could not be checked: the payload diameter or the candidate's "
+            "inner diameter is unknown. Give the payload diameter in mm.",
+        ),
+        "desk_fit": (
+            "desk_thickness_mm",
+            "Desk fit could not be checked: the desk thickness or the candidate's supported "
+            "clamp range is unknown. Give the desk thickness in mm.",
+        ),
+        "envelope_fit": (
+            "max_protrusion_mm",
+            "Envelope fit could not be checked: the allowed protrusion or the candidate's "
+            "clamp reach is unknown. Give the maximum protrusion in mm.",
+        ),
+    }
+    for name, check in by_name.items():
+        if check.status != CandidateFitStatus.NA:
+            continue
+        prompt = _UNKNOWN_PROMPTS.get(name)
+        if prompt is not None:
+            questions.append(
+                ClarificationQuestion(field=prompt[0], question=prompt[1], priority="high")
+            )
+
     if not questions:
         questions.append(
             ClarificationQuestion(

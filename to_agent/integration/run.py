@@ -13,6 +13,7 @@ from ..cost import CostEstimate, estimate_cost
 from ..device import describe_device, pick_device
 from ..meshing.masks import Masks, build_masks
 from ..meshing.voxel_backend import HexMesh, build_hex_grid
+from ..postprocess.connectivity import carries_boundary_conditions, keep_largest_component
 from ..postprocess.export import save_stl, save_vti
 from ..postprocess.viz import save_history_png, save_render_png
 from ..regions import resolve_domain
@@ -64,6 +65,19 @@ def run_problem(
     result = optimize(problem, mesh, masks, dev, log=log, progress=progress)
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    # One body before anything is exported or checked, so the STL and the FE model below
+    # describe the same object. Trimming the mesh instead would leave the post-check
+    # solving a body that is not the one shipped.
+    result.rho, trim = keep_largest_component(mesh, result.rho, threshold)
+    if trim["trimmed"] and log:
+        log(
+            f"connectivity: kept the largest of {trim['components_before']} bodies "
+            f"({trim['removed_elements']} elements removed)"
+        )
+    attached = carries_boundary_conditions(
+        mesh, result.rho, masks, [lc.id for lc in problem.load_cases], threshold
+    )
+
     u0 = result.u[0] if result.u else None
     save_vti(mesh, result.rho, out_dir / "rho.vti", u=u0)
     stl_info = save_stl(mesh, result.rho, out_dir / "design.stl", threshold)
@@ -86,6 +100,7 @@ def run_problem(
 
     summary = {
         "post_check": check,
+        "connectivity": {**trim, **attached},
         "out_dir": str(out_dir),
         "device": result.device,
         "device_desc": describe_device(dev),

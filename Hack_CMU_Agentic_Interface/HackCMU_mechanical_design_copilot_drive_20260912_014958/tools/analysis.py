@@ -1,24 +1,35 @@
-"""Deterministic structural analysis tool (mock FEM).
+"""Seed-sizing heuristic for the structural layout. NOT an analysis.
 
-The LLM constructs the AnalysisInput. This tool returns typed results.
-It must never be treated as safety validation.
+This picks starting member thicknesses and brace counts for the geometry that is handed to
+the optimizer. It is a closed-form monotone rule — thicker members and more braces score
+better — and it reads ONLY `support_thickness_mm` and `brace_count`. Payload force,
+material and actual geometry do not enter, so its numbers are not predictions of anything
+physical and carry no accept/reject authority over a design.
 
-The default mock is a parametric loop-testing model: thicker members and more
-braces reduce displacement and stress. Numbers are not physically accurate.
+The real gate is the post-optimization linear FE check (`to_agent.integration.postcheck`),
+evaluated in `Orchestrator._acceptance_verdict`. That is the only place a design can be
+accepted or rejected on strength.
+
+Naming note: the functions below keep their historical `mock_loop_*` names because tests
+and the review loop import them; `is_mock=True` on the output is what the UI keys off.
 """
 
 from __future__ import annotations
 
 from schemas import AnalysisInput, AnalysisOutput, StructureOutput
 
-MOCK_LOOP_DISCLAIMER = (
-    "DETERMINISTIC MOCK RESPONSE FOR LOOP TESTING. "
-    "Not real FEM. Do not treat as engineering validation."
+SEED_SIZING_DISCLAIMER = (
+    "SEED-SIZING HEURISTIC, NOT ANALYSIS. Closed-form function of support thickness and "
+    "brace count only; load, material and geometry are not inputs. Used to size the "
+    "starting layout. It cannot accept or reject a design — the post-optimization FE "
+    "check does that."
 )
+# Back-compat for importers of the old name.
+MOCK_LOOP_DISCLAIMER = SEED_SIZING_DISCLAIMER
 
 
 def mock_loop_displacement_mm(structure: StructureOutput) -> float:
-    """stiffness grows with thickness and extra braces; iteration 0 is ~8 mm."""
+    """Seed-sizing score in mm: falls as thickness and braces grow. Iteration 0 is ~8."""
     thickness = structure.parameters.support_thickness_mm
     braces = structure.parameters.brace_count
     stiffness = thickness + 4.0 * max(braces - 1, 0)
@@ -26,6 +37,7 @@ def mock_loop_displacement_mm(structure: StructureOutput) -> float:
 
 
 def mock_loop_stress_pa(structure: StructureOutput) -> float:
+    """Companion seed-sizing score in Pa. Not a stress prediction."""
     thickness = structure.parameters.support_thickness_mm
     braces = structure.parameters.brace_count
     stress_mpa = 24.0 / max(thickness + 2.0 * max(braces - 1, 0), 1e-6)
@@ -51,7 +63,7 @@ def run_analysis(inp: AnalysisInput, never_pass: bool = False) -> AnalysisOutput
         factor_of_safety=None,
         reaction_forces_N=reactions,
         is_safety_validation=False,
-        solver="deterministic-mock-loop",
-        solver_status="simulated_only",
-        disclaimer=MOCK_LOOP_DISCLAIMER,
+        solver="seed-sizing-heuristic",
+        solver_status="seed_sizing_only",
+        disclaimer=SEED_SIZING_DISCLAIMER,
     )

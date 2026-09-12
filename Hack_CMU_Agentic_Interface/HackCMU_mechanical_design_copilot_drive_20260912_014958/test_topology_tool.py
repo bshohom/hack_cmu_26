@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from schemas import ImportedCandidateGeometry, LoadCase, PartGeometry, TopologyInput, TopologyOutput
 from tools import topology as topology_tool
+
+
+def _real_stl(tmpdir: str, name: str = "design.stl") -> str:
+    """A non-empty file on disk: the tool rejects a result naming a mesh that isn't there."""
+    path = Path(tmpdir) / name
+    path.write_text("solid x\nendsolid x\n")
+    return str(path)
 
 
 def _inp(candidate=None) -> TopologyInput:
@@ -28,15 +37,18 @@ class TopologyToolTests(unittest.TestCase):
         """Without a candidate mesh the tool still runs live (from requirements), not a mock."""
         seen = {}
 
-        def fake(inp, out_root=None, log=None, progress=None):
-            seen["candidate"] = inp.get("candidate")
-            return {"is_mock": False, "optimized_geometry_ref": "/tmp/d.stl", "solver_status": "converged",
-                    "model": "from scratch", "notes": "designed from the requirements"}
+        with tempfile.TemporaryDirectory() as tmp:
+            stl = _real_stl(tmp, "d.stl")
 
-        with mock.patch.dict(os.environ, {"TO_AGENT_MODE": "auto"}), mock.patch.object(
-            topology_tool, "_import_adapter", return_value=fake
-        ):
-            out = topology_tool.run_topology_optimization(_inp(None))
+            def fake(inp, out_root=None, log=None, progress=None):
+                seen["candidate"] = inp.get("candidate")
+                return {"is_mock": False, "optimized_geometry_ref": stl, "solver_status": "converged",
+                        "model": "from scratch", "notes": "designed from the requirements"}
+
+            with mock.patch.dict(os.environ, {"TO_AGENT_MODE": "auto"}), mock.patch.object(
+                topology_tool, "_import_adapter", return_value=fake
+            ):
+                out = topology_tool.run_topology_optimization(_inp(None))
         self.assertIsNone(seen["candidate"])
         self.assertFalse(out.is_mock)
         self.assertIn("requirements", out.notes)
@@ -67,6 +79,10 @@ class TopologyToolTests(unittest.TestCase):
         self.assertIn("not importable", out.notes)
 
     def test_live_result_is_validated(self) -> None:
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        stl = _real_stl(tmpdir.name)
+
         def fake(inp, out_root=None, log=None, progress=None):
             self.assertEqual(inp["candidate"]["task"], "cupholder")
             return {
@@ -74,10 +90,10 @@ class TopologyToolTests(unittest.TestCase):
                 "compliance": 0.46,
                 "volume_fraction": 0.2,
                 "mass_reduction_pct": 30.5,
-                "optimized_geometry_ref": "/tmp/design.stl",
+                "optimized_geometry_ref": stl,
                 "solver_status": "converged",
                 "model": "to_agent SIMP/OC",
-                "artifacts": {"design_stl": "/tmp/design.stl"},
+                "artifacts": {"design_stl": stl},
                 "iterations": 40,
                 "wall_time_s": 41.9,
                 "converged": True,
@@ -91,7 +107,44 @@ class TopologyToolTests(unittest.TestCase):
         self.assertIsInstance(out, TopologyOutput)
         self.assertFalse(out.is_mock)
         self.assertEqual(out.iterations, 40)
-        self.assertEqual(out.optimized_geometry_ref, "/tmp/design.stl")
+        self.assertEqual(out.optimized_geometry_ref, stl)
+
+
+    def test_result_naming_a_missing_mesh_is_not_a_success(self) -> None:
+        """A run that reports success but wrote no file must not read as a live result."""
+        def fake(inp, out_root=None, log=None, progress=None):
+            return {"is_mock": False, "optimized_geometry_ref": "/tmp/never_written.stl",
+                    "solver_status": "converged", "model": "x", "notes": "ok"}
+
+        with mock.patch.dict(os.environ, {"TO_AGENT_MODE": "auto"}), mock.patch.object(
+            topology_tool, "_import_adapter", return_value=fake
+        ):
+            out = topology_tool.run_topology_optimization(_inp(_candidate()))
+        self.assertTrue(out.is_mock)
+        self.assertIn("produced no mesh file", out.notes)
+
+    def test_live_mode_raises_instead_of_returning_a_placeholder(self) -> None:
+        """TO_AGENT_MODE=live: the workflow must fail, not continue on a mock."""
+        def boom(_inp, out_root=None, log=None, progress=None):
+            raise ValueError("problem too big")
+
+        with mock.patch.dict(os.environ, {"TO_AGENT_MODE": "live"}), mock.patch.object(
+            topology_tool, "_import_adapter", return_value=boom
+        ):
+            with self.assertRaises(topology_tool.TopologyUnavailable) as ctx:
+                topology_tool.run_topology_optimization(_inp(_candidate()))
+        self.assertIn("problem too big", str(ctx.exception))
+
+    def test_live_mode_raises_when_the_mesh_file_is_missing(self) -> None:
+        def fake(inp, out_root=None, log=None, progress=None):
+            return {"is_mock": False, "optimized_geometry_ref": "/tmp/never_written.stl",
+                    "solver_status": "converged", "model": "x", "notes": "ok"}
+
+        with mock.patch.dict(os.environ, {"TO_AGENT_MODE": "live"}), mock.patch.object(
+            topology_tool, "_import_adapter", return_value=fake
+        ):
+            with self.assertRaises(topology_tool.TopologyUnavailable):
+                topology_tool.run_topology_optimization(_inp(_candidate()))
 
 
 if __name__ == "__main__":

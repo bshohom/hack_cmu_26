@@ -14,7 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from ..contracts import BoxRegion, CapsuleRegion, LoadCase, Region, Support, TOProblem
+from ..contracts import Assumption, BoxRegion, CapsuleRegion, LoadCase, Region, Support, TOProblem
+from .agent_regions import load_cases_from_input, supports_from_input
 from .materials import material_from_name
 
 GRIP_DEPTH_MM = 55.0  # how far the clamp reaches back over/under the desk
@@ -115,28 +116,87 @@ def build_from_requirements(
     h = element_size
     half_w = env.max_width_mm / 2.0
     half_px, half_py = patch[0] / 2.0, patch[1] / 2.0
+    assumptions: list[Assumption] = []
 
-    # Design domain: the allowed envelope, plus the grip region behind the desk edge.
+    # Boundary conditions come from the agent when it supplied them. The archetype layouts
+    # below are a fallback for when it did not, and say so in `assumptions`.
+    supports, sup_assumptions = supports_from_input(topology_input, h)
+    assumptions += sup_assumptions
+    agent_supports = bool(supports)
+    agent_loads, load_assumptions = load_cases_from_input(topology_input, h)
+    assumptions += load_assumptions
+
+    # Design domain: the envelope is a hard bound, not a suggestion. The grip region behind
+    # the desk edge (x < 0) is not "protrusion", so max_protrusion only bounds +x.
     x_lo = -GRIP_DEPTH_MM if clamped else -10.0
     x_hi = env.max_protrusion_mm
     z_lo = min(load_z - h, -h) if clamped else 0.0
     z_hi = max(desk_t + h, load_z + h)
-    domain = BoxRegion(min=(x_lo - h, -half_w - h, z_lo - h), max=(x_hi + h, half_w + h, z_hi + h))
+    # The archetype's load_z only describes the archetype. When the agent placed the regions
+    # itself, the domain has to contain those instead.
+    for region in [s.region for s in supports] + [c.region for c in agent_loads]:
+        z_lo = min(z_lo, region.min[2] - h)
+        z_hi = max(z_hi, region.max[2] + h)
+    # max_height_mm read as the part's z-extent measured from the desk top surface.
+    z_hi_capped = min(z_hi, desk_t + env.max_height_mm)
+    z_lo_capped = max(z_lo, desk_t - env.max_height_mm)
+    if z_hi_capped < z_hi - 1e-9 or z_lo_capped > z_lo + 1e-9:
+        assumptions.append(
+            Assumption(
+                field="design_domain.z",
+                value=f"[{z_lo_capped:.1f}, {z_hi_capped:.1f}] mm",
+                basis=(
+                    f"max_height_mm={env.max_height_mm} applied as z-extent about the desk "
+                    f"top (z={desk_t} mm); the unbounded span would have been "
+                    f"[{z_lo:.1f}, {z_hi:.1f}] mm"
+                ),
+            )
+        )
+    z_lo, z_hi = z_lo_capped, z_hi_capped
+    if z_hi - z_lo < 2 * h:  # a domain thinner than two elements cannot be meshed
+        raise ValueError(
+            f"envelope max_height_mm={env.max_height_mm} leaves a {z_hi - z_lo:.1f} mm tall "
+            f"domain, below the {2 * h:.1f} mm minimum for element size {h} mm"
+        )
+    domain = BoxRegion(min=(x_lo, -half_w, z_lo), max=(x_hi, half_w, z_hi))
 
     void: list = []
-    supports: list = []
     preserve: list = []
     if clamped:
-        # The desk itself is forbidden material; the jaws grip its top and underside.
+        # The desk itself is forbidden material.
         void.append(BoxRegion(min=(x_lo - 2 * h, -half_w - 2 * h, 0.0), max=(0.0, half_w + 2 * h, desk_t)))
-        supports.append(Support(id="top_jaw", region=BoxRegion(min=(x_lo + 2.0, -half_w, desk_t), max=(-2.0, half_w, desk_t + h)), provenance="derived"))
-        supports.append(Support(id="bottom_jaw", region=BoxRegion(min=(x_lo + 2.0, -half_w, -h), max=(-2.0, half_w, 0.0)), provenance="derived"))
+    if agent_supports:
+        # Keep a solid skin over each attachment patch so the mount has material to react into.
+        for s in supports:
+            preserve.append(s.region)
+    elif clamped:
+        # The jaws grip the desk's top and underside.
+        supports.append(Support(id="top_jaw", region=BoxRegion(min=(x_lo + 2.0, -half_w, desk_t), max=(-2.0, half_w, desk_t + h)), provenance="assumed"))
+        supports.append(Support(id="bottom_jaw", region=BoxRegion(min=(x_lo + 2.0, -half_w, -h), max=(-2.0, half_w, 0.0)), provenance="assumed"))
         preserve.append(BoxRegion(min=(x_lo, -half_w, desk_t), max=(-1.0, half_w, desk_t + CONTACT_MM)))
         preserve.append(BoxRegion(min=(x_lo, -half_w, -CONTACT_MM), max=(-1.0, half_w, 0.0)))
+        assumptions.append(
+            Assumption(
+                field="supports",
+                value=f"top_jaw + bottom_jaw gripping {GRIP_DEPTH_MM} mm behind the desk edge",
+                basis=f"no fixed_regions supplied; clamp layout assumed from attachment_method={method!r}",
+            )
+        )
     else:
         # Free-standing: the part is bonded to the desk top over its footprint.
-        supports.append(Support(id="base", region=BoxRegion(min=(x_lo, -half_w, z_lo - h), max=(x_hi * 0.6, half_w, z_lo + h)), provenance="derived"))
+        supports.append(Support(id="base", region=BoxRegion(min=(x_lo, -half_w, z_lo - h), max=(x_hi * 0.6, half_w, z_lo + h)), provenance="assumed"))
         preserve.append(BoxRegion(min=(x_lo, -half_w, z_lo), max=(x_hi * 0.6, half_w, z_lo + CONTACT_MM)))
+        assumptions.append(
+            Assumption(
+                field="supports",
+                value="base bonded to the desk top over 60% of the footprint",
+                basis=(
+                    f"no fixed_regions supplied; free-standing layout assumed from "
+                    f"attachment_method={method!r}. Fully fixed in x/y/z, so tipping and "
+                    f"sliding are not modelled"
+                ),
+            )
+        )
 
     # The payload contact patch is preserved and loaded.
     patch_box = BoxRegion(min=(load_x - half_px, -half_py, load_z - h), max=(load_x + half_px, half_py, load_z + CONTACT_MM))
@@ -148,15 +208,30 @@ def build_from_requirements(
         void.append(BoxRegion(min=(load_x - half_px, -half_py, load_z + CONTACT_MM + 0.5), max=(x_hi + h, half_py, z_hi + h)))
 
     material, mat_note = material_from_name(topology_input.get("material"))
-    load_cases = [
-        LoadCase(id=load_id, region=BoxRegion(min=(load_x - half_px, -half_py, load_z - h), max=(load_x + half_px, half_py, load_z + CONTACT_MM)), force_N=force, provenance="user"),
-    ]
-    mag = max(abs(v) for v in force) or 1.0
-    if kind == "strap":
-        # Outward pull keeps the retaining lip structural instead of dead weight.
-        load_cases.append(LoadCase(id="outward_pull", region=load_cases[0].region, force_N=(0.4 * mag, 0.0, 0.0), weight=0.6, provenance="assumed"))
-    else:
-        load_cases.append(LoadCase(id="side_bump", region=load_cases[0].region, force_N=(0.0, 0.3 * mag, 0.0), weight=0.4, provenance="assumed"))
+    # Every agent load case, each at its own named region. Only when the agent supplied no
+    # usable load regions does the archetype place a single patch and invent a second case.
+    load_cases = agent_loads
+    if not load_cases:
+        load_cases = [
+            LoadCase(id=load_id, region=BoxRegion(min=(load_x - half_px, -half_py, load_z - h), max=(load_x + half_px, half_py, load_z + CONTACT_MM)), force_N=force, provenance="user"),
+        ]
+        mag = max(abs(v) for v in force) or 1.0
+        if kind == "strap":
+            # Outward pull keeps the retaining lip structural instead of dead weight.
+            load_cases.append(LoadCase(id="outward_pull", region=load_cases[0].region, force_N=(0.4 * mag, 0.0, 0.0), weight=0.6, provenance="assumed"))
+        else:
+            load_cases.append(LoadCase(id="side_bump", region=load_cases[0].region, force_N=(0.0, 0.3 * mag, 0.0), weight=0.4, provenance="assumed"))
+        assumptions.append(
+            Assumption(
+                field="load_cases",
+                value=f"{load_cases[0].id} at (x={load_x:.1f}, z={load_z:.1f}) plus {load_cases[1].id}",
+                basis=(
+                    f"no usable load_regions supplied; patch placed by the {kind!r} archetype "
+                    f"and a secondary case sized at {load_cases[1].force_N} N from the primary "
+                    f"magnitude"
+                ),
+            )
+        )
 
     warm_start, warm_note = structure_warm_start(topology_input.get("structure"), min_radius=1.5 * h)
     problem = TOProblem(
@@ -172,8 +247,9 @@ def build_from_requirements(
         target_element_size=h,
         filter_radius=1.5 * h,
         max_iters=60,
+        assumptions=assumptions,
         notes=(
-            f"Designed from requirements only (no candidate mesh): payload kind {kind}, "
+            f"Designed from requirements only (no candidate mesh): "
             f"{'clamped' if clamped else 'free-standing'}, desk {desk_t} mm, envelope "
             f"{env.max_protrusion_mm}x{env.max_width_mm}x{env.max_height_mm} mm. {warm_note} {mat_note}".strip()
         ),
@@ -181,10 +257,13 @@ def build_from_requirements(
     report = {
         "mode": "from_requirements",
         "warm_start": warm_note or "uniform (no structural members supplied)",
+        "supports_from": "agent fixed_regions" if agent_supports else f"{method!r} archetype",
+        "loads_from": "agent load_regions" if not load_assumptions and load_cases else "archetype",
         "payload_kind": kind,
         "attachment": method,
         "desk_thickness_mm": desk_t,
         "envelope_mm": [env.max_protrusion_mm, env.max_width_mm, env.max_height_mm],
         "load_patch_mm": {"x": load_x, "z": load_z, "size": list(patch)},
+        "assumptions": [a.model_dump() for a in assumptions],
     }
     return problem, report

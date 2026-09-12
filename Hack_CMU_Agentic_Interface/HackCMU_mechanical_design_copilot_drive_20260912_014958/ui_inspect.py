@@ -134,11 +134,12 @@ def design_loop_timeline(state: DesignState) -> List[Dict[str, Any]]:
         )
         steps.append(
             {
-                "title": "ANALYSIS — MOCK",
-                "badge": "MOCK",
+                "title": "SEED SIZING — HEURISTIC",
+                "badge": "SIZING",
                 "detail": (
-                    f"disp {analysis.max_displacement_mm:.2f} mm, "
-                    f"stress {analysis.max_stress_pa / 1e6:.2f} MPa"
+                    f"score {analysis.max_displacement_mm:.2f} mm / "
+                    f"{analysis.max_stress_pa / 1e6:.2f} MPa from thickness and brace count "
+                    "only; not an analysis and not a pass/fail gate"
                 ),
             }
         )

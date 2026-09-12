@@ -9,6 +9,8 @@ implementations of registration, FEM, or topology optimization.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional, Set, Tuple
 
 from agents.design_review import review_design
@@ -45,15 +47,27 @@ from schemas import (
 from state import DesignState
 from tools.analysis import run_analysis
 from tools.cad import generate_cad
-from tools.topology import run_topology_optimization
+from tools.topology import TopologyUnavailable, run_topology_optimization
 
 MAX_STRUCTURE_ITERATIONS = 4
+
+# Used when the requirements do not state one. FDM parts are printed with layer-adhesion
+# weakness already folded into the material yield, so this is a design margin, not a code.
+DEFAULT_REQUIRED_FOS = 1.5
+
+
+@dataclass
+class _Verdict:
+    passed: bool
+    summary: str
 
 _STOP_STAGES: Set[WorkflowStage] = {
     WorkflowStage.COMPLETE,
     WorkflowStage.REJECTED,
     WorkflowStage.REQUEST_INFORMATION,
     WorkflowStage.DESIGN_REVIEW_FAILED,
+    WorkflowStage.TOPOLOGY_FAILED,
+    WorkflowStage.VERIFICATION_FAILED,
 }
 
 _TRACE_FIELDS = [
@@ -129,6 +143,8 @@ class Orchestrator:
             WorkflowStage.COMPLETE: self._handle_complete,
             WorkflowStage.REJECTED: self._handle_complete,
             WorkflowStage.DESIGN_REVIEW_FAILED: self._handle_complete,
+            WorkflowStage.TOPOLOGY_FAILED: self._handle_complete,
+            WorkflowStage.VERIFICATION_FAILED: self._handle_complete,
         }
 
     def ingest_user_request(self, message: str) -> DesignState:
@@ -473,9 +489,18 @@ class Orchestrator:
                 payload_size_mm=self.state.geometry.payload_object.bottle_diameter_mm,
                 structure=self.state.structure,
             )
-            self.state.topology = run_topology_optimization(
-                inp, log=self.topology_log, progress=self.topology_progress
-            )
+            try:
+                self.state.topology = run_topology_optimization(
+                    inp, log=self.topology_log, progress=self.topology_progress
+                )
+            except TopologyUnavailable as exc:
+                self.state.stage = WorkflowStage.TOPOLOGY_FAILED
+                self.state.safety_status = SafetyStatus.NEEDS_REVIEW
+                self.state.notes = (
+                    f"TOPOLOGY_FAILED: live optimization did not produce a result. {exc} "
+                    "No CAD artifact was written and the run did not continue on a placeholder."
+                )
+                return
         if self.state.analysis.is_mock or self.state.topology.is_mock:
             self.state.safety_status = SafetyStatus.UNVERIFIED
         self.state.stage = WorkflowStage.VERIFICATION
@@ -499,58 +524,145 @@ class Orchestrator:
                 self.state.cad = generate_cad(
                     CadInput(geometry=self.state.geometry, topology=self.state.topology)
                 )
-        artifacts_ok = artifacts_ok and self.state.cad is not None
+        # "Artifacts complete" means files exist on disk, not that Python objects exist.
+        missing = self._missing_artifact_files()
+        artifacts_ok = artifacts_ok and self.state.cad is not None and not missing
 
         mocked = analysis_mock or topology_mock or (
             self.state.cad.is_mock if self.state.cad is not None else True
         )
         if mocked:
-            safety_validated = False
-            safety_status = SafetyStatus.UNVERIFIED
             reason = "mock analysis data" if analysis_mock else "analysis is not a safety certification"
             if topology_mock:
                 reason += "; mock topology data"
         else:
-            safety_validated = False
-            safety_status = SafetyStatus.UNVERIFIED
             reason = "this prototype does not certify physical safety"
-        check = self.state.topology.post_check if self.state.topology is not None else None
-        if check is not None:
-            fos = f"{check.factor_of_safety:.2f}" if check.factor_of_safety is not None else "n/a"
-            reason += (
-                f"; post-TO linear FE check at nominal load: max displacement "
-                f"{check.max_displacement_mm:.3f} mm, max stress {check.max_stress_pa / 1e6:.2f} MPa, "
-                f"factor of safety {fos} (not a certification)"
-            )
 
         if not artifacts_ok:
+            detail = (
+                f"Artifact file(s) named by the run are not on disk: {'; '.join(missing)}. "
+                if missing
+                else "Required prototype artifacts are missing. "
+            )
             self.state.verification = VerificationResult(
                 artifacts_complete=False,
                 analysis_is_mock=analysis_mock,
                 topology_is_mock=topology_mock,
                 safety_validated=False,
+                notes=detail + "stage remains VERIFICATION. NOT validated for physical use.",
+            )
+            self.state.safety_status = SafetyStatus.NEEDS_REVIEW
+            return
+
+        # The post-optimization FE check and the mesh acceptance checks are the real gate.
+        gate = self._acceptance_verdict()
+        reason += "; " + gate.summary
+
+        if not gate.passed and not topology_mock:
+            self.state.verification = VerificationResult(
+                artifacts_complete=True,
+                analysis_is_mock=analysis_mock,
+                topology_is_mock=topology_mock,
+                safety_validated=False,
                 notes=(
-                    "Required prototype artifacts are missing. "
-                    "stage remains VERIFICATION. NOT validated for physical use."
+                    f"VERIFICATION_FAILED: {gate.summary}. "
+                    "An artifact was produced but does not meet the accepted requirements. "
+                    "NOT validated for physical use."
                 ),
             )
             self.state.safety_status = SafetyStatus.NEEDS_REVIEW
+            self.state.stage = WorkflowStage.VERIFICATION_FAILED
+            self.state.notes = gate.summary
             return
 
         self.state.verification = VerificationResult(
             artifacts_complete=True,
             analysis_is_mock=analysis_mock,
             topology_is_mock=topology_mock,
-            safety_validated=safety_validated,
+            safety_validated=False,
             notes=(
                 "engineering validation: UNVERIFIED. "
                 f"reason: {reason}. "
-                "COMPLETE means artifacts exist, not physical safety. "
+                "COMPLETE means the artifact exists and passed the acceptance checks above "
+                "under idealized boundary conditions, not physical safety. "
                 "NOT validated for physical use."
             ),
         )
-        self.state.safety_status = safety_status
+        self.state.safety_status = SafetyStatus.UNVERIFIED
         self.state.stage = WorkflowStage.COMPLETE
+
+    def _missing_artifact_files(self) -> List[str]:
+        """Artifact paths this run claims but that are not present and non-empty on disk."""
+        missing: List[str] = []
+        topology = self.state.topology
+        if topology is not None and not topology.is_mock:
+            ref = Path(topology.optimized_geometry_ref or "")
+            if not (ref.is_file() and ref.stat().st_size > 0):
+                missing.append(f"optimized geometry {topology.optimized_geometry_ref!r}")
+        cad = self.state.cad
+        if cad is not None and not cad.is_mock:
+            path = Path(cad.filename or "")
+            if not (path.is_file() and path.stat().st_size > 0):
+                missing.append(f"CAD export {cad.filename!r}")
+        return missing
+
+    def _acceptance_verdict(self) -> "_Verdict":
+        """Combine the mesh acceptance checks with the post-TO FE check.
+
+        Unknown is not a pass: a check that could not run blocks completion just as a failed
+        one does, because "we did not look" and "we looked and it was fine" are different
+        claims and only one of them justifies handing someone a part to print.
+        """
+        topology = self.state.topology
+        if topology is None:
+            return _Verdict(False, "no topology result")
+        if topology.is_mock:
+            return _Verdict(True, "mock topology: no acceptance checks apply")
+
+        problems: List[str] = []
+        acceptance = topology.acceptance or {}
+        if not acceptance:
+            problems.append("mesh acceptance checks did not run")
+        else:
+            if acceptance.get("failed"):
+                problems.append("failed mesh checks: " + ", ".join(acceptance["failed"]))
+            if acceptance.get("unknown"):
+                problems.append("unverifiable mesh checks: " + ", ".join(acceptance["unknown"]))
+
+        check = topology.post_check
+        if check is None:
+            problems.append("post-TO FE check did not run, so strength is unknown")
+            fe = ""
+        else:
+            fos = check.factor_of_safety
+            required = self._required_factor_of_safety()
+            fos_text = f"{fos:.2f}" if fos is not None else "n/a"
+            fe = (
+                f"post-TO linear FE at nominal load: max displacement "
+                f"{check.max_displacement_mm:.3f} mm, max stress {check.max_stress_pa / 1e6:.2f} MPa, "
+                f"factor of safety {fos_text} (required {required})"
+            )
+            if fos is None:
+                problems.append("factor of safety could not be computed (no yield strength)")
+            elif fos < required:
+                problems.append(f"factor of safety {fos:.2f} is below the required {required}")
+
+        if topology.unsupported_requirements:
+            names = ", ".join(str(u.get("requirement")) for u in topology.unsupported_requirements)
+            problems.append(f"requirements accepted but not applied: {names}")
+
+        idealizations = (
+            "FE idealizations: thresholded voxels with residual void stiffness, supports fully "
+            "fixed in x/y/z, peak stress smoothed over element size"
+        )
+        if problems:
+            return _Verdict(False, "; ".join(problems) + (f". {fe}" if fe else ""))
+        return _Verdict(True, f"{fe}. {idealizations}" if fe else idealizations)
+
+    def _required_factor_of_safety(self) -> float:
+        req = self.state.requirements
+        value = getattr(getattr(req, "safety", None), "min_factor_of_safety", None) if req else None
+        return float(value) if value else DEFAULT_REQUIRED_FOS
 
     def _handle_complete(self) -> None:
         return

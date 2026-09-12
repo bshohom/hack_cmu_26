@@ -16,6 +16,31 @@ import numpy as np
 CONFIDENCE_PREFILL = 0.7  # >= this: pre-fill the question with the registered value
 MESH_SUFFIXES = {".ply", ".stl", ".obj", ".glb"}
 
+# Where a thickness number actually came from. surfcap can synthesize an underside from a
+# supplied or default thickness and then mesh it watertight, so "the pipeline produced a
+# number" says nothing about whether anything was measured. Only an observed or explicitly
+# entered thickness may pre-fill a question; a synthesized one must be asked about.
+#   observed  - measured from surfaces the reconstruction actually saw
+#   user      - supplied by a person (CLI --thickness)
+#   assumed   - a default, an OBB over-estimate, or a mirrored/invented underside
+_THICKNESS_PROVENANCE = {
+    "top-bottom planes": "observed",
+    "front face extent": "observed",
+    "slab top/bottom faces": "observed",
+    "arg": "user",
+    "default": "assumed",
+    "obb": "assumed",
+    "obb_estimate": "assumed",
+    "z extent": "assumed",
+    "postprocess": "assumed",  # source not stated by surfcap: not evidence of observation
+    "none": "assumed",
+}
+
+
+def thickness_provenance(source: str | None) -> str:
+    """Unknown sources are 'assumed': absence of provenance is not provenance."""
+    return _THICKNESS_PROVENANCE.get((source or "none").strip().lower(), "assumed")
+
 
 def measurements_from_path(path: str | Path) -> dict[str, Any]:
     """Dispatch: surfcap target.json, or a registered scene mesh (metres, Z-up, mount face at z≈0)."""
@@ -25,7 +50,7 @@ def measurements_from_path(path: str | Path) -> dict[str, Any]:
     return target_to_measurements(path)
 
 
-def scene_mesh_to_measurements(path: str | Path) -> dict[str, Any]:
+def scene_mesh_to_measurements(path: str | Path, mesh_stats: dict | None = None) -> dict[str, Any]:
     """Desk/table thickness and extent from a plane-fitted slab mesh (surfcap Generated_Scene_meshes).
 
     Thickness = median height of upward-facing faces minus median height of downward-facing
@@ -57,21 +82,34 @@ def scene_mesh_to_measurements(path: str | Path) -> dict[str, Any]:
         source = "z extent"
         notes.append("no clear top/bottom face pair; thickness from z extent (upper bound)")
     ok = thickness is not None and 3.0 <= thickness <= 120.0
-    confidence = 0.75 if (ok and mesh.is_watertight and source.startswith("slab")) else 0.4
+    # A scene mesh carries no provenance metadata, and surfcap currently closes slabs by
+    # mirroring the top face at a supplied or default thickness. Measuring the gap between
+    # those two faces then just returns the number that was used to build them, so this is
+    # only an observation once surfcap reports that a bottom plane was actually seen.
+    # (Handed to the surfcap owner: emit `mirrored_underside` in the postprocess stats.)
+    observed_bottom = bool(mesh_stats and mesh_stats.get("mirrored_underside") is False)
+    provenance = thickness_provenance(source) if observed_bottom else "assumed"
+    confidence = 0.75 if (ok and mesh.is_watertight and provenance == "observed") else 0.4
     if not ok:
         notes.append(f"thickness {thickness:.1f} mm is not a plausible mounting slab")
         confidence = 0.0
     if not mesh.is_watertight:
         notes.append("mesh not watertight")
+    if provenance != "observed":
+        notes.append(
+            f"thickness is {provenance}, not measured ({source}); it will not pre-fill"
+        )
     ext = (hi - lo) * scale
     return {
         "source": "registration",
         "target_json": str(path),
         "units": "mm",
         "confidence": confidence,
-        "prefill": bool(ok and confidence >= CONFIDENCE_PREFILL),
+        # A watertight mesh proves nothing when the underside was synthesized to make it so.
+        "prefill": bool(ok and confidence >= CONFIDENCE_PREFILL and provenance in ("observed", "user")),
         "desk_thickness_mm": round(float(thickness), 1) if thickness is not None else None,
         "thickness_source": source,
+        "thickness_provenance": provenance,
         "mount_normal": [0.0, 0.0, 1.0],
         "mount_extent_mm": [round(float(ext[0]), 1), round(float(ext[1]), 1)],
         "front_edge_mm": None,
@@ -137,14 +175,27 @@ def target_to_measurements(path: str | Path) -> dict[str, Any]:
         conf = round(conf * 0.7, 3)
         reasons.append("thickness from OBB minor extent")
 
+    provenance = thickness_provenance(thickness_source)
+    if thickness_mm is not None and provenance != "observed":
+        reasons.append(
+            f"thickness is {provenance}, not measured (source: {thickness_source}); "
+            "it will not pre-fill"
+        )
     out: dict[str, Any] = {
         "source": "registration",
         "target_json": str(path),
         "units": "mm",
         "confidence": conf if thickness_mm is not None else 0.0,
-        "prefill": thickness_mm is not None and conf >= CONFIDENCE_PREFILL,
+        # Confidence alone is not enough: a default thickness scored 1.0 and pre-filled a
+        # number nobody measured. Provenance gates the pre-fill.
+        "prefill": (
+            thickness_mm is not None
+            and conf >= CONFIDENCE_PREFILL
+            and provenance in ("observed", "user")
+        ),
         "desk_thickness_mm": round(thickness_mm, 2) if thickness_mm is not None else None,
         "thickness_source": thickness_source,
+        "thickness_provenance": provenance,
         "mount_normal": top.get("normal") if top else None,
         "mount_extent_mm": [round(float(v) * 1000.0, 1) for v in top["extent_m"]] if top and top.get("extent_m") else None,
         "front_edge_mm": None,

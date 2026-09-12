@@ -3,5 +3,5 @@
   "analysis_is_mock": true,
   "topology_is_mock": true,
   "safety_validated": false,
-  "notes": "engineering validation: UNVERIFIED. reason: mock analysis data; mock topology data. COMPLETE means artifacts exist, not physical safety. NOT validated for physical use."
+  "notes": "engineering validation: UNVERIFIED. reason: mock analysis data; mock topology data; mock topology: no acceptance checks apply. COMPLETE means the artifact exists and passed the acceptance checks above under idealized boundary conditions, not physical safety. NOT validated for physical use."
 }

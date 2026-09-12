@@ -15,7 +15,39 @@ def test_scene_mesh_thickness():
     assert m["units"] == "mm" and m["thickness_source"].startswith("slab")
     assert 15.0 <= m["desk_thickness_mm"] <= 40.0
     assert 600 <= m["mount_extent_mm"][0] <= 700
+    # surfcap closes slabs by mirroring the top face at a supplied/default thickness, so
+    # the gap between the two faces is the input echoed back, not a measurement. It must
+    # not pre-fill until surfcap reports that a bottom plane was actually observed.
+    assert m["thickness_provenance"] == "assumed"
+    assert m["prefill"] is False
+    assert any("not measured" in n for n in m["notes"])
+
+
+def test_scene_mesh_with_observed_underside_may_prefill():
+    """Once surfcap reports a real bottom plane, the same number becomes usable."""
+    if not SCENE_DESK.exists():
+        return
+    from to_agent.ingest.surfcap import scene_mesh_to_measurements
+
+    m = scene_mesh_to_measurements(SCENE_DESK, mesh_stats={"mirrored_underside": False})
+    assert m["thickness_provenance"] == "observed"
     assert m["prefill"] is True
+
+
+def test_default_thickness_never_prefills(tmp_path):
+    """The audit's reproduction: thickness_source='default' scored confidence 1.0."""
+    target = {
+        "frame": {"units": "m"},
+        "scale": {"reliable": True, "rms_mm": 0.9, "n_views_with_ref": 9},
+        "surfaces": [],
+        "cloud": {"postprocess": {"thickness_m": 0.018, "thickness_source": "default"}},
+    }
+    p = tmp_path / "t.json"
+    p.write_text(json.dumps(target))
+    m = target_to_measurements(p)
+    assert m["desk_thickness_mm"] == 18.0
+    assert m["thickness_provenance"] == "assumed"
+    assert m["prefill"] is False
 
 
 def test_example_target_is_confident():

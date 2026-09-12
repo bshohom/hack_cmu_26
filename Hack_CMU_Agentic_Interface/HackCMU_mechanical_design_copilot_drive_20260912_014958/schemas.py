@@ -28,6 +28,11 @@ class WorkflowStage(str, Enum):
     COMPLETE = "complete"
     REJECTED = "rejected"
     DESIGN_REVIEW_FAILED = "design_review_failed"
+    # Live optimization was requested and could not produce a result. Terminal: the run
+    # does not silently continue on a placeholder.
+    TOPOLOGY_FAILED = "topology_failed"
+    # Artifacts or the post-optimization FE check did not meet the acceptance criteria.
+    VERIFICATION_FAILED = "verification_failed"
 
 
 class InteractionDecision(str, Enum):
@@ -494,6 +499,15 @@ class TopologyOutput(BaseModel):
     converged: Optional[bool] = None
     post_check: Optional[AnalysisOutput] = None  # linear FE check of the optimized design
     problem_report: Dict[str, Any] = Field(default_factory=dict)
+    # Acceptance of the exported mesh: single_body / watertight / within_envelope /
+    # mass_within_cap / supports_attached / loads_attached, each True, False, or None
+    # ("not checkable"). `failed` and `unknown` list the names; `accepted` requires both
+    # to be empty, so an unverifiable check never reads as a pass.
+    acceptance: Dict[str, Any] = Field(default_factory=dict)
+    # Values the problem builder invented ({field, value, basis}); shown, not buried.
+    assumptions: List[Dict[str, Any]] = Field(default_factory=list)
+    # Requirements that were accepted upstream but could not be applied by the solver.
+    unsupported_requirements: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class CadInput(BaseModel):
