@@ -1137,9 +1137,10 @@ with st.sidebar:
     st.divider()
     st.header("Component Mode")
     st.caption(
-        "Default custom workflow uses Cursor live scene reasoning when available and "
-        "Adaptive Synthetic Geometry. Registration, Analysis, Topology, and CAD remain mocked. "
-        "Golden Fixture is a regression / integration test, not the normal experiment."
+        "Defaults are the mocks. Live pieces: warm-start generation (Grok geometry source), "
+        "topology optimization (Topology = Live; CAD is then the optimized STL), and registration "
+        "measurements when a surfcap target.json is provided. Structure, analysis, design review "
+        "and safety status remain mocked / UNVERIFIED. Golden Fixture is a regression test."
     )
     st.text_input(
         "Registration target.json (surfcap, optional)",
