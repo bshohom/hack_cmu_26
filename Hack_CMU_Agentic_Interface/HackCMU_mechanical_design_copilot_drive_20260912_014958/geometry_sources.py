@@ -39,9 +39,9 @@ GENERATED_PROVENANCE = (
 )
 
 FIELD_LABELS = {
-    "filled_bottle_mass_kg": "Filled bottle / payload mass (kg)",
-    "bottle_diameter_mm": "Bottle / payload diameter (mm)",
-    "bottle_height_mm": "Bottle / payload height (mm)",
+    "filled_bottle_mass_kg": "Payload mass, filled / loaded (kg)",
+    "bottle_diameter_mm": "Payload size (mm): diameter, strap width or footprint",
+    "bottle_height_mm": "Payload height (mm)",
     "desk_thickness_mm": "Desk / mounting-surface thickness (mm)",
     "attachment_method": "Attachment method (clamp / screws / adhesive)",
     "allowed_contact_region": "Allowed mount region on the desk",

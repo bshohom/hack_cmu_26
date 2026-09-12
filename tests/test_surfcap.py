@@ -1,10 +1,21 @@
 import json
 from pathlib import Path
 
-from to_agent.ingest.surfcap import target_to_measurements
+from to_agent.ingest.surfcap import measurements_from_path, target_to_measurements
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "HackCMU" / "examples" / "target.example.json"
+SCENE_DESK = ROOT / "HackCMU" / "Generated_Scene_meshes" / "desk.ply"
+
+
+def test_scene_mesh_thickness():
+    if not SCENE_DESK.exists():
+        return
+    m = measurements_from_path(SCENE_DESK)
+    assert m["units"] == "mm" and m["thickness_source"].startswith("slab")
+    assert 15.0 <= m["desk_thickness_mm"] <= 40.0
+    assert 600 <= m["mount_extent_mm"][0] <= 700
+    assert m["prefill"] is True
 
 
 def test_example_target_is_confident():

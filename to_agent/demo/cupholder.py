@@ -22,6 +22,7 @@ from ..contracts import (
 )
 from ..ingest.dimensions import parse_dimensions
 from ..ingest.point_cloud import fit_circle, load_point_cloud
+from ..integration.materials import printed_material
 
 ASSUMED = "assumed"
 
@@ -127,7 +128,7 @@ def build_cupholder_problem(
     pad = h + 1.0
 
     problem = TOProblem(
-        material=Material(name="PLA", E_MPa=2300.0, nu=0.35, density_kg_m3=1240.0, yield_MPa=50.0, confidence=ASSUMED),
+        material=printed_material("PLA"),
         design_domain=BoxRegion(
             min=(float(lo[0] - pad), float(lo[1] - pad), float(lo[2] - pad)),
             max=(float(hi[0] + pad), float(hi[1] + pad), float(hi[2] + pad)),

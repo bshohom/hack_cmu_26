@@ -22,6 +22,7 @@ from ..contracts import (
 )
 from ..ingest.dimensions import parse_dimensions
 from ..ingest.point_cloud import load_point_cloud
+from ..integration.materials import printed_material
 from .cupholder import ASSUMED, _horizontal_faces
 
 
@@ -77,7 +78,7 @@ def build_shelf_problem(
     px, py = g.platform_x, g.platform_y
 
     problem = TOProblem(
-        material=Material(name="PLA", E_MPa=2300.0, nu=0.35, density_kg_m3=1240.0, yield_MPa=50.0, confidence=ASSUMED),
+        material=printed_material("PLA"),
         design_domain=BoxRegion(
             min=(float(lo[0] - pad), float(lo[1] - pad), g.z_min - 0.5),
             max=(float(hi[0] + pad), float(hi[1] + pad), g.z_top + 0.5),  # nothing above the flat top

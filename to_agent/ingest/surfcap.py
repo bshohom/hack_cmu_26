@@ -14,6 +14,71 @@ from typing import Any
 import numpy as np
 
 CONFIDENCE_PREFILL = 0.7  # >= this: pre-fill the question with the registered value
+MESH_SUFFIXES = {".ply", ".stl", ".obj", ".glb"}
+
+
+def measurements_from_path(path: str | Path) -> dict[str, Any]:
+    """Dispatch: surfcap target.json, or a registered scene mesh (metres, Z-up, mount face at z≈0)."""
+    path = Path(path)
+    if path.suffix.lower() in MESH_SUFFIXES:
+        return scene_mesh_to_measurements(path)
+    return target_to_measurements(path)
+
+
+def scene_mesh_to_measurements(path: str | Path) -> dict[str, Any]:
+    """Desk/table thickness and extent from a plane-fitted slab mesh (surfcap Generated_Scene_meshes).
+
+    Thickness = median height of upward-facing faces minus median height of downward-facing
+    faces; a slab needs both. Units are assumed metres when the extent is < 5 (surfcap
+    convention), else mm. Confidence is lower than a target.json because there is no scale
+    metadata: 0.75 for a watertight slab with both faces, 0.4 otherwise.
+    """
+    import trimesh
+
+    path = Path(path)
+    mesh = trimesh.load(path, force="mesh")
+    if mesh.is_empty or len(mesh.faces) == 0:
+        raise ValueError(f"{path} has no faces")
+    lo, hi = mesh.bounds
+    scale = 1000.0 if float(max(hi - lo)) < 5.0 else 1.0  # metres -> mm
+    normals = mesh.face_normals
+    centroids = mesh.triangles_center * scale
+    up = normals[:, 2] > 0.9
+    down = normals[:, 2] < -0.9
+    notes: list[str] = []
+    thickness = None
+    if up.sum() >= 3 and down.sum() >= 3:
+        z_top = float(np.median(centroids[up, 2]))
+        z_bot = float(np.median(centroids[down, 2]))
+        thickness = z_top - z_bot
+        source = "slab top/bottom faces"
+    else:
+        thickness = float((hi - lo)[2] * scale)
+        source = "z extent"
+        notes.append("no clear top/bottom face pair; thickness from z extent (upper bound)")
+    ok = thickness is not None and 3.0 <= thickness <= 120.0
+    confidence = 0.75 if (ok and mesh.is_watertight and source.startswith("slab")) else 0.4
+    if not ok:
+        notes.append(f"thickness {thickness:.1f} mm is not a plausible mounting slab")
+        confidence = 0.0
+    if not mesh.is_watertight:
+        notes.append("mesh not watertight")
+    ext = (hi - lo) * scale
+    return {
+        "source": "registration",
+        "target_json": str(path),
+        "units": "mm",
+        "confidence": confidence,
+        "prefill": bool(ok and confidence >= CONFIDENCE_PREFILL),
+        "desk_thickness_mm": round(float(thickness), 1) if thickness is not None else None,
+        "thickness_source": source,
+        "mount_normal": [0.0, 0.0, 1.0],
+        "mount_extent_mm": [round(float(ext[0]), 1), round(float(ext[1]), 1)],
+        "front_edge_mm": None,
+        "frame": {"origin_desc": "surfcap scene mesh (metres, Z-up, mount face near z=0)", "up": [0, 0, 1],
+                  "note": "scene mesh frame; not the candidate mesh frame"},
+        "notes": notes,
+    }
 
 
 def _confidence(target: dict) -> tuple[float, list[str]]:

@@ -176,9 +176,9 @@ def _registration_measurements() -> Optional[Dict[str, Any]]:
     if cached and cached.get("target_json") == path:
         return cached
     try:
-        from to_agent.ingest.surfcap import target_to_measurements
+        from to_agent.ingest.surfcap import measurements_from_path
 
-        meas = target_to_measurements(path)
+        meas = measurements_from_path(path)
     except Exception as exc:  # noqa: BLE001 — unreadable file or to_agent missing
         meas = {"target_json": path, "error": f"{type(exc).__name__}: {exc}", "confidence": 0.0, "prefill": False}
     st.session_state.registration_meas = meas
@@ -1143,9 +1143,9 @@ with st.sidebar:
         "and safety status remain mocked / UNVERIFIED. Golden Fixture is a regression test."
     )
     st.text_input(
-        "Registration target.json (surfcap, optional)",
+        "Registration output (surfcap target.json or scene mesh .ply, optional)",
         key="reg_target_path",
-        placeholder="/path/to/out/<scene>/target.json",
+        placeholder="…/HackCMU/Generated_Scene_meshes/desk.ply  or  …/out/<scene>/target.json",
         help="Output of Aman's photo registration pipeline. Measurements are used only when their confidence is high; otherwise the user is asked.",
     )
     _reg = _registration_measurements()

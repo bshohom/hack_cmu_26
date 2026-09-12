@@ -35,15 +35,38 @@ UNSUPPORTED_PATTERNS: List[Tuple[str, str]] = [
     ("hinge mechanism", "Dynamic mechanisms are out of scope."),
 ]
 
+# (keyword in the request, payload description, payload kind) — first match wins.
+PAYLOAD_KEYWORDS: List[Tuple[str, str, str]] = [
+    ("cup holder", "bottle", "cylinder"),
+    ("bottle", "bottle", "cylinder"),
+    ("mug", "mug", "cylinder"),
+    ("bag", "bag", "strap"),
+    ("hook", "bag", "strap"),
+    ("headphone", "headphones", "strap"),
+    ("stapler", "stapler", "box"),
+    ("shelf", "stapler", "box"),
+    ("phone", "phone", "box"),
+    ("laptop", "laptop", "box"),
+    ("monitor", "monitor", "box"),
+]
+
+# The size question depends on the payload kind; the field name stays `bottle_diameter_mm`
+# for contract compatibility (it is the payload's characteristic size in mm).
+SIZE_QUESTIONS = {
+    "cylinder": "What is the {payload} diameter (mm)?",
+    "strap": "What is the {payload} strap / handle width that rests on the hook (mm)?",
+    "box": "What is the {payload} footprint width (mm)?",
+}
+
 REQUIRED_FIELDS = [
     (
         "filled_bottle_mass_kg",
-        "What is the filled bottle / payload mass (kg)?",
+        "What is the {payload} mass (kg), filled / fully loaded?",
         "high",
     ),
     (
         "bottle_diameter_mm",
-        "What is the bottle diameter (mm)?",
+        "What is the {payload} characteristic size (mm) — diameter, strap width or footprint?",
         "high",
     ),
     (
@@ -123,9 +146,11 @@ class InteractionAgent:
         return self._decide(requirements)
 
     def _extract_keywords(self, req: UserRequirements, lowered: str) -> None:
-        if "cup holder" in lowered or "bottle" in lowered:
-            req.payload.description = "bottle"
-            req.object_geometry.kind = "cylinder"
+        for keyword, description, kind in PAYLOAD_KEYWORDS:
+            if keyword in lowered:
+                req.payload.description = description
+                req.object_geometry.kind = kind
+                break
         if "desk" in lowered:
             req.environment.kind = "desk_plane"
         if "1 l" in lowered or "1l" in lowered or "one liter" in lowered:
@@ -186,10 +211,15 @@ class InteractionAgent:
             "max_protrusion_mm": req.design_envelope.max_protrusion_mm,
             "manufacturing_method": req.manufacturing.method,
         }
+        payload = req.payload.description or "payload"
         missing: List[MissingInformation] = []
         for field, question, priority in REQUIRED_FIELDS:
             if not values.get(field):
+                if field == "bottle_diameter_mm":
+                    question = SIZE_QUESTIONS.get(req.object_geometry.kind, question)
                 missing.append(
-                    MissingInformation(field=field, reason=question, priority=priority)
+                    MissingInformation(
+                        field=field, reason=question.format(payload=payload), priority=priority
+                    )
                 )
         return missing

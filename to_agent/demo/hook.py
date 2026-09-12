@@ -22,6 +22,7 @@ from ..contracts import (
 )
 from ..ingest.dimensions import parse_dimensions
 from ..ingest.point_cloud import load_point_cloud
+from ..integration.materials import printed_material
 from .cupholder import ASSUMED, _horizontal_faces
 
 
@@ -101,7 +102,7 @@ def build_hook_problem(
         return IntersectionRegion(regions=[near, box])
 
     problem = TOProblem(
-        material=Material(name="PLA", E_MPa=2300.0, nu=0.35, density_kg_m3=1240.0, yield_MPa=50.0, confidence=ASSUMED),
+        material=printed_material("PLA"),
         design_domain=BoxRegion(min=tuple(float(v) for v in lo - pad), max=tuple(float(v) for v in hi + pad)),
         warm_start=[near],
         preserve=[
