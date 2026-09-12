@@ -174,35 +174,63 @@ def imported_candidate_mesh_figure(candidate: ImportedCandidateGeometry) -> go.F
     return _mesh_figure_from_path(candidate.mesh_path)
 
 
+@lru_cache(maxsize=8)
+def _load_mesh_arrays(mesh_path: str, max_faces: int = 150_000):
+    """(vertices, faces) for STL/OBJ/PLY via trimesh; OBJ text parser as fallback."""
+    try:
+        import trimesh
+
+        mesh = trimesh.load(mesh_path, force="mesh")
+        if len(mesh.faces) > max_faces:  # keep the browser responsive on dense candidates
+            try:
+                mesh = mesh.simplify_quadric_decimation(face_count=max_faces)
+            except Exception:  # noqa: BLE001 — decimation is optional
+                pass
+        return mesh.vertices.tolist(), mesh.faces.tolist()
+    except Exception:  # noqa: BLE001
+        from imported_candidate import parse_obj_mesh
+
+        return parse_obj_mesh(Path(mesh_path))
+
+
+def _mesh_trace(mesh_path: str, name: str, color: str, opacity: float) -> go.Mesh3d:
+    vertices, faces = _load_mesh_arrays(mesh_path)
+    return go.Mesh3d(
+        x=[v[0] for v in vertices],
+        y=[v[1] for v in vertices],
+        z=[v[2] for v in vertices],
+        i=[f[0] for f in faces],
+        j=[f[1] for f in faces],
+        k=[f[2] for f in faces],
+        color=color,
+        opacity=opacity,
+        flatshading=True,
+        lighting=dict(ambient=0.55, diffuse=0.8, specular=0.2),
+        name=name,
+        hoverinfo="skip",
+    )
+
+
+def optimized_design_figure(candidate_mesh_path: Optional[str], design_mesh_path: str) -> go.Figure:
+    """Optimized design (opaque) over the warm-start candidate (faint) in the same frame."""
+    traces = []
+    if candidate_mesh_path and Path(candidate_mesh_path).exists():
+        traces.append(_mesh_trace(candidate_mesh_path, "warm start", "#9aa5b1", 0.18))
+    traces.append(_mesh_trace(design_mesh_path, "optimized design", "#2f6fb0", 1.0))
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        scene=dict(xaxis_title="X mm", yaxis_title="Y mm", zaxis_title="Z mm", aspectmode="data", dragmode="orbit"),
+        margin=dict(l=0, r=0, t=36, b=0),
+        title="OPTIMIZED DESIGN (blue) over WARM START (grey)",
+        height=520,
+        showlegend=True,
+    )
+    return fig
+
+
 @lru_cache(maxsize=2)
 def _mesh_figure_from_path(mesh_path: str) -> go.Figure:
-    from imported_candidate import parse_obj_mesh
-
-    vertices, faces = parse_obj_mesh(Path(mesh_path))
-    xs = [v[0] for v in vertices]
-    ys = [v[1] for v in vertices]
-    zs = [v[2] for v in vertices]
-    i = [f[0] for f in faces]
-    j = [f[1] for f in faces]
-    k = [f[2] for f in faces]
-    fig = go.Figure(
-        data=[
-            go.Mesh3d(
-                x=xs,
-                y=ys,
-                z=zs,
-                i=i,
-                j=j,
-                k=k,
-                color="#6b8cae",
-                opacity=1.0,
-                flatshading=True,
-                lighting=dict(ambient=0.55, diffuse=0.8, specular=0.2),
-                name="imported candidate",
-                hoverinfo="skip",
-            )
-        ]
-    )
+    fig = go.Figure(data=[_mesh_trace(mesh_path, "imported candidate", "#6b8cae", 1.0)])
     fig.update_layout(
         scene=dict(
             xaxis_title="X mm",

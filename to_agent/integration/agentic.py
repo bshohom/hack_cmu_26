@@ -53,22 +53,34 @@ def _mesh_volume(path: str | None) -> Optional[float]:
         return None
 
 
+MAX_CONTAINS_FACES = 20_000  # trimesh.contains (ray casting) gets slow beyond this
+
+
 def _warm_start_regions(candidate: dict, h: float) -> list:
-    """inside_mesh when the candidate mesh is a watertight surface, else near_points."""
+    """Warm-start occupancy: particle KDTree shell (fast) when a particle file exists,
+    inside_mesh for small watertight meshes, otherwise a surface sample of the mesh."""
+    particles = candidate.get("particle_path")
+    if particles and Path(particles).exists():
+        return [NearPointsRegion(path=str(particles), tol=h)]
     mesh_path = candidate.get("mesh_path")
     if mesh_path and Path(mesh_path).exists():
         try:
             import trimesh
 
             m = trimesh.load(mesh_path, force="mesh")
-            if not m.is_empty and len(m.faces) > 0 and m.is_watertight:
-                return [InsideMeshRegion(path=str(mesh_path))]
+            if not m.is_empty and len(m.faces) > 0:
+                if m.is_watertight and len(m.faces) <= MAX_CONTAINS_FACES:
+                    return [InsideMeshRegion(path=str(mesh_path))]
+                sampled = Path(mesh_path).with_suffix("").as_posix() + "_particles.obj"
+                pts, _ = trimesh.sample.sample_surface(m, 75_000)
+                with open(sampled, "w") as f:
+                    f.write("# surface sample of the candidate mesh; units mm\n")
+                    for p in pts:
+                        f.write(f"v {p[0]:.4f} {p[1]:.4f} {p[2]:.4f}\n")
+                return [NearPointsRegion(path=sampled, tol=h)]
         except Exception:  # noqa: BLE001
             pass
-    particles = candidate.get("particle_path")
-    if particles and Path(particles).exists():
-        return [NearPointsRegion(path=str(particles), tol=h)]
-    raise AdapterError("candidate has neither a watertight mesh_path nor a particle_path")
+    raise AdapterError("candidate has neither a usable mesh_path nor a particle_path")
 
 
 def _box(d: dict, pad: float = 0.0) -> BoxRegion:
@@ -163,6 +175,31 @@ def build_from_registry(candidate: dict, topology_input: dict, h: float, volfrac
     return problem, report
 
 
+MASS_TARGET_RATIO = 1.0  # same material budget as the warm start (TO redistributes it)
+VF_BOUNDS = (0.08, 0.5)
+MIN_ITERS_GENERATED = 40
+
+
+def volume_fraction_from_candidate(problem: TOProblem, candidate: dict) -> tuple[float, str]:
+    """Volume fraction of the design region such that preserve + design material ≈
+    MASS_TARGET_RATIO x the candidate's volume. Falls back to the current value."""
+    from .run import prepare
+
+    v_cand = _mesh_volume(candidate.get("mesh_path"))
+    if not v_cand:
+        return problem.volume_fraction, "candidate volume unknown; kept template volume fraction"
+    mesh, masks = prepare(problem)
+    v_e = mesh.elem_volume
+    n_design = int(masks.design.sum())
+    n_preserve = int(masks.preserve.sum())
+    vf = (MASS_TARGET_RATIO * v_cand - n_preserve * v_e) / max(n_design * v_e, 1e-9)
+    vf_clamped = float(min(max(vf, VF_BOUNDS[0]), VF_BOUNDS[1]))
+    return vf_clamped, (
+        f"volume fraction {vf_clamped:.3f} set from candidate volume {v_cand:.0f} mm^3 "
+        f"(target {MASS_TARGET_RATIO:.0%}, preserve {n_preserve * v_e:.0f} mm^3, design region {n_design * v_e:.0f} mm^3)"
+    )
+
+
 # ----------------------------------------------------------------------------- entry point
 def run_topology(topology_input: dict, out_root: str | Path | None = None, log: Log = None) -> dict:
     """Return a dict with the TopologyOutput fields (is_mock=False) or raise AdapterError."""
@@ -178,16 +215,21 @@ def run_topology(topology_input: dict, out_root: str | Path | None = None, log: 
     max_iters = opts.get("max_iters")
 
     task = candidate.get("task") or "cupholder"
+    notes: list[str] = []
     if task == "generated":
         problem, report = build_generated_problem(candidate, topology_input, h, float(volfrac or 0.2), safety_factor)
+        if volfrac is None:
+            problem.volume_fraction, vf_note = volume_fraction_from_candidate(problem, candidate)
+            notes.append(vf_note)
     else:
         problem, report = build_from_registry(candidate, topology_input, h, volfrac, safety_factor)
     material, mat_note = material_from_name(topology_input.get("material"))
     problem.material = material
     if max_iters:
         problem.max_iters = int(max_iters)
+    if task == "generated":
+        problem.max_iters = max(problem.max_iters, MIN_ITERS_GENERATED)
 
-    notes: list[str] = []
     if mat_note:
         notes.append(mat_note)
     requested_vf = topology_input.get("target_volume_fraction")
@@ -229,6 +271,12 @@ def topology_output(outcome: RunOutcome, candidate: dict, problem: TOProblem, no
         f"to_agent SIMP/OC on torch-fem ({s['solver_mode']}, h={problem.target_element_size:.2f} mm, "
         f"{s['masks']['n_elem']} elems, SF={problem.safety_factor})"
     )
+    components = s["stl"].get("components")
+    if components is not None and components != 1:
+        notes.append(
+            f"WARNING: the rho>=0.5 isosurface has {components} disconnected bodies; the load path is "
+            "not fully solid at this volume fraction — raise volume_fraction or max_iters and rerun"
+        )
     return {
         "is_mock": False,
         "compliance": float(s["compliance"][-1]),

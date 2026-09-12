@@ -1,0 +1,19 @@
+grok_warmstart — generated warm start
+Units: mm
+
+DESIGN DIMENSIONS
+- Holder ID: 91.0
+- Protrusion: 120.0
+- Clamp gap: 27.0
+- Wall thickness: 5.0
+
+NOTES
+- FDM PLA, >=4mm walls, 1.1kg bottle, desk 25mm
+
+MESH
+- Vertices: 312
+- Faces: 620
+- Watertight: True
+- Connected components: 1
+- Bounding box min: [-40.0, -50.5, -34.5]
+- Bounding box max: [120.0, 50.5, 32.5]

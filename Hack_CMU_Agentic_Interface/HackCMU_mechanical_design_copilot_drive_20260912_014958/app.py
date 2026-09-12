@@ -18,6 +18,7 @@ from geometry_sources import (
     FIELD_LABELS,
     GEOM_ADAPTIVE,
     GEOM_GOLDEN,
+    GEOM_GENERATED,
     GEOM_IMPORTED,
     GEOM_LIVE,
     GEOM_MODE_OPTIONS,
@@ -46,6 +47,7 @@ from cursor_adapter import (
 )
 from orchestrator import Orchestrator
 from providers import get_provider
+from tools.warmstart import generate_warm_start
 from reasoning import set_reasoning_provider
 from schemas import (
     InteractionResult,
@@ -70,6 +72,7 @@ from ui_viz import (
     geometry_figure,
     imported_candidate_mesh_figure,
     imported_candidate_particle_figure,
+    optimized_design_figure,
     structure_figure,
 )
 
@@ -112,11 +115,58 @@ BADGE_COLORS = {
 }
 
 
+def _topology_live() -> bool:
+    return st.session_state.get("mode_topo") == "Live"
+
+
+def _topology_options():
+    """Solver knobs from the sidebar (only when Topology = Live)."""
+    from schemas import TopologySolverOptions
+
+    if not _topology_live():
+        return None
+    return TopologySolverOptions(
+        element_size_mm=float(st.session_state.get("topo_elem", 4.0)),
+        max_iters=int(st.session_state.get("topo_iters", 40)),
+        time_budget_s=float(st.session_state.get("topo_budget", 150)),
+        device="auto",
+    )
+
+
+def _warm_start_generator():
+    """Generator callable for the GEOMETRY stage when the geometry source is Grok-generated."""
+    if effective_geometry_mode(st.session_state.get("mode_geom")) != GEOM_GENERATED:
+        return None
+    provider = get_provider("grok")
+    if not provider.configured:
+        return None
+
+    def _generate(requirements):
+        result = generate_warm_start(requirements, provider, name="grok_warmstart")
+        st.session_state.warm_start_result = {
+            "ok": result.ok,
+            "model": result.model,
+            "attempts": result.attempts,
+            "latency_s": round(result.latency_s, 1),
+            "out_dir": result.out_dir,
+            "script_path": result.script_path,
+            "problems": result.problems,
+            "error": result.error[-600:],
+        }
+        if not result.ok:
+            raise RuntimeError(result.error or "; ".join(result.problems) or "generation failed")
+        return result.candidate
+
+    return _generate
+
+
 def _new_orchestrator() -> Orchestrator:
     mode = effective_geometry_mode(st.session_state.get("mode_geom"))
     return Orchestrator(
-        fixtures=fixtures_for_geometry_mode(mode),
+        fixtures=fixtures_for_geometry_mode(mode, topology_live=_topology_live()),
         imported_candidate=imported_candidate_for_mode(mode),
+        topology_options=_topology_options(),
+        warm_start_generator=_warm_start_generator(),
     )
 
 
@@ -146,6 +196,8 @@ def _geometry_mode_label(mode: str) -> str:
         return "Live Geometry  —  not connected"
     if mode == GEOM_IMPORTED:
         return "Imported Candidate Geometry"
+    if mode == GEOM_GENERATED:
+        return "Generated Warm Start (Grok)"
     return "Adaptive Synthetic Mock"
 
 
@@ -365,8 +417,10 @@ def _sync_orch_fixtures() -> None:
     if orch.state.geometry is not None:
         return
     mode = st.session_state.get("mode_geom")
-    orch.fixtures = fixtures_for_geometry_mode(mode)
+    orch.fixtures = fixtures_for_geometry_mode(mode, topology_live=_topology_live())
     orch.imported_candidate = imported_candidate_for_mode(mode)
+    orch.topology_options = _topology_options()
+    orch.warm_start_generator = _warm_start_generator()
 
 
 def _continue_design() -> None:
@@ -397,7 +451,11 @@ def _continue_design() -> None:
         WorkflowStage.REQUEST_INFORMATION,
         WorkflowStage.DESIGN_REVIEW_FAILED,
     ):
-        orch.run()
+        if _topology_live() or orch.warm_start_generator is not None:
+            with st.spinner("Running live stages (warm-start generation / topology optimization)…"):
+                orch.run()
+        else:
+            orch.run()
         if orch.state.contract_error:
             _append(
                 "assistant",
@@ -480,10 +538,14 @@ def _run_summary(state: DesignState) -> str:
         )
     if state.topology is not None:
         t = state.topology
-        lines.append(
-            f"Topology: {'MOCK' if t.is_mock else 'LIVE'} — "
-            f"volume fraction {t.volume_fraction}."
-        )
+        if t.is_mock:
+            lines.append(f"Topology: MOCK — volume fraction {t.volume_fraction}. {t.notes}".rstrip())
+        else:
+            lines.append(
+                f"Topology: LIVE — compliance {t.compliance:.4g}, volume fraction {t.volume_fraction:.3f}, "
+                f"mass change vs warm start {-t.mass_reduction_pct:+.0f}%, {t.iterations} iterations in "
+                f"{t.wall_time_s:.0f} s ({t.solver_status}); STL: {t.optimized_geometry_ref}"
+            )
     if state.verification is not None:
         v = state.verification
         lines.append(
@@ -994,12 +1056,32 @@ with st.sidebar:
     elif st.session_state.mode_geom == GEOM_IMPORTED:
         st.caption(geometry_provenance_text(GEOM_IMPORTED))
         st.caption("Uses cupholder_dimensions.txt, cupholder_single_piece_PLA.obj, and cupholder_surface_particles.obj.")
+    elif st.session_state.mode_geom == GEOM_GENERATED:
+        st.caption(geometry_provenance_text(GEOM_GENERATED))
+        _grok = get_provider("grok")
+        if _grok.configured:
+            st.caption(f"Generator model: {_grok.model} (writes a trimesh script; up to 3 validation retries).")
+        else:
+            st.warning(_grok.not_connected_reason)
     else:
         st.caption(geometry_provenance_text(GEOM_ADAPTIVE))
     st.radio("Analysis", ["Mock Fixture", "Live"], index=0, disabled=True, key="mode_analysis")
     st.caption("Live implementation not connected yet.")
-    st.radio("Topology", ["Mock Fixture", "Live"], index=0, disabled=True, key="mode_topo")
-    st.caption("Live implementation not connected yet.")
+    st.radio(
+        "Topology",
+        ["Mock Fixture", "Live"],
+        index=0,
+        key="mode_topo",
+        help="Live runs SIMP on torch-fem (to_agent) with the candidate mesh as warm start; needs an Imported or Generated geometry source.",
+    )
+    if st.session_state.get("mode_topo") == "Live":
+        with st.expander("Topology settings", expanded=False):
+            st.number_input("Element size (mm)", min_value=2.0, max_value=10.0, value=4.0, step=0.5, key="topo_elem")
+            st.number_input("Max iterations", min_value=5, max_value=120, value=40, step=5, key="topo_iters")
+            st.number_input("Time budget (s)", min_value=30, max_value=900, value=150, step=30, key="topo_budget")
+        st.caption("Falls back to the mock (with the reason) if no candidate mesh exists or the run fails.")
+    else:
+        st.caption("Mock fixture. Switch to Live for a real optimization.")
     reasoning_choice = st.radio(
         "Reasoning Provider",
         REASONING_CHOICES,
@@ -1358,6 +1440,26 @@ with center:
                 use_container_width=True,
             )
         _render_candidate_panel(candidate, state.candidate_fit)
+        if candidate.task == "generated":
+            ws = st.session_state.get("warm_start_result") or {}
+            with st.expander("Generated warm start — provenance", expanded=False):
+                st.write(
+                    {
+                        "model": ws.get("model"),
+                        "attempts": ws.get("attempts"),
+                        "latency_s": ws.get("latency_s"),
+                        "watertight": candidate.watertight,
+                        "components": candidate.connected_components,
+                        "faces": candidate.face_count,
+                        "frame": candidate.frame,
+                        "script": ws.get("script_path"),
+                    }
+                )
+                if candidate.dimensions_path and Path(candidate.dimensions_path).exists():
+                    st.code(Path(candidate.dimensions_path).read_text(), language="text")
+    elif st.session_state.get("warm_start_result") and not st.session_state["warm_start_result"].get("ok"):
+        ws = st.session_state["warm_start_result"]
+        st.error(f"Warm-start generation failed after {ws.get('attempts')} attempt(s): {ws.get('error') or ws.get('problems')}")
 
     if state.geometry is not None and state.structure is None and candidate is None:
         st.plotly_chart(geometry_figure(state.geometry), use_container_width=True)
@@ -1405,21 +1507,57 @@ with center:
         st.markdown("**Topology optimization**")
         t = state.topology
         if t.is_mock:
-            st.warning("MOCK PLACEHOLDER — Shohom fixture. No printable mesh yet.")
-        st.write(
-            {
-                "model": t.model,
-                "volume_fraction": t.volume_fraction,
-                "mass_reduction_pct": t.mass_reduction_pct,
-                "geometry_ref": t.optimized_geometry_ref,
-                "is_mock": t.is_mock,
-            }
-        )
-        mesh_path = Path(t.optimized_geometry_ref)
-        if mesh_path.suffix.lower() in {".stl", ".obj"} and mesh_path.exists():
-            st.success(f"Mesh available for later display: {mesh_path}")
+            st.warning("MOCK PLACEHOLDER — no printable mesh from this run.")
+            if t.notes:
+                st.caption(t.notes)
+            st.write(
+                {
+                    "model": t.model,
+                    "volume_fraction": t.volume_fraction,
+                    "mass_reduction_pct": t.mass_reduction_pct,
+                    "geometry_ref": t.optimized_geometry_ref,
+                    "is_mock": t.is_mock,
+                }
+            )
         else:
-            st.caption("STL/OBJ hook: display a real mesh here when a file path exists.")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Compliance", f"{t.compliance:.3g}")
+            m2.metric("Volume fraction", f"{t.volume_fraction:.2f}")
+            m3.metric("Mass vs warm start", f"{-t.mass_reduction_pct:+.0f}%")
+            m4.metric("Wall time", f"{t.wall_time_s or 0:.0f} s")
+            st.caption(f"{t.model} · {t.solver_status} · {t.iterations} iterations")
+            if t.notes:
+                st.caption(t.notes)
+            mesh_path = Path(t.optimized_geometry_ref)
+            if mesh_path.suffix.lower() in {".stl", ".obj"} and mesh_path.exists():
+                st.plotly_chart(
+                    optimized_design_figure(t.artifacts.get("candidate_mesh"), str(mesh_path)),
+                    use_container_width=True,
+                )
+                img_cols = st.columns(2)
+                for col, key, caption in (
+                    (img_cols[0], "history_png", "Convergence history"),
+                    (img_cols[1], "render_png", "Density isosurface"),
+                ):
+                    img = t.artifacts.get(key)
+                    if img and Path(img).exists():
+                        col.image(img, caption=caption, use_container_width=True)
+                st.download_button(
+                    "Download optimized STL",
+                    data=mesh_path.read_bytes(),
+                    file_name=mesh_path.name,
+                    mime="model/stl",
+                    use_container_width=True,
+                )
+            else:
+                st.caption(f"Optimized mesh not found on disk: {mesh_path}")
+            if t.post_check is not None:
+                pc = t.post_check
+                fos = f"{pc.factor_of_safety:.2f}" if pc.factor_of_safety is not None else "n/a"
+                st.info(
+                    f"Post-TO linear FE check at nominal load: max displacement {pc.max_displacement_mm:.3f} mm, "
+                    f"max von Mises {pc.max_stress_pa / 1e6:.2f} MPa, factor of safety {fos}. {pc.disclaimer}"
+                )
 
     if state.cad is not None:
         cad = state.cad

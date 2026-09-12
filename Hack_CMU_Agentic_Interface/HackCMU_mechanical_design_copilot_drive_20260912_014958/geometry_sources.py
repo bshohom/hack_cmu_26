@@ -16,10 +16,11 @@ from state import DesignState
 
 GEOM_ADAPTIVE = "Adaptive Synthetic Mock"
 GEOM_IMPORTED = "Imported Candidate Geometry"
+GEOM_GENERATED = "Generated Warm Start (Grok)"
 GEOM_GOLDEN = "Golden Fixture"
 GEOM_LIVE = "Live Geometry"
 
-GEOM_MODE_OPTIONS = [GEOM_ADAPTIVE, GEOM_IMPORTED, GEOM_GOLDEN, GEOM_LIVE]
+GEOM_MODE_OPTIONS = [GEOM_ADAPTIVE, GEOM_IMPORTED, GEOM_GENERATED, GEOM_GOLDEN, GEOM_LIVE]
 
 GOLDEN_PROVENANCE = "Fixed golden integration fixture. Regression / integration test."
 ADAPTIVE_PROVENANCE = (
@@ -31,6 +32,11 @@ IMPORTED_PROVENANCE = (
     "Not Yujie GeometryOutput and not reconstructed scene geometry."
 )
 LIVE_PROVENANCE = "Live Geometry is not connected yet."
+GENERATED_PROVENANCE = (
+    "Warm-start mesh generated from the structured requirements: the reasoning model writes a "
+    "parametric trimesh script that is executed and validated (watertight, single body, inside "
+    "the envelope). Not reconstructed scene geometry; mesh vertices are not LLM-emitted."
+)
 
 FIELD_LABELS = {
     "filled_bottle_mass_kg": "Filled bottle / payload mass (kg)",
@@ -71,13 +77,13 @@ _COMPARE_FIELDS = [
 
 
 def effective_geometry_mode(mode: Optional[str]) -> str:
-    if mode in {GEOM_ADAPTIVE, GEOM_IMPORTED, GEOM_GOLDEN, GEOM_LIVE}:
+    if mode in GEOM_MODE_OPTIONS:
         return mode
     return GEOM_ADAPTIVE
 
 
 def uses_synthetic_geometry(mode: Optional[str]) -> bool:
-    return effective_geometry_mode(mode) in {GEOM_ADAPTIVE, GEOM_IMPORTED}
+    return effective_geometry_mode(mode) in {GEOM_ADAPTIVE, GEOM_IMPORTED, GEOM_GENERATED}
 
 
 def fixtures_for_geometry_mode(mode: Optional[str], topology_live: bool = False) -> IntegrationFixtures:
@@ -119,6 +125,8 @@ def geometry_provenance_text(mode: Optional[str]) -> str:
         return ADAPTIVE_PROVENANCE
     if effective == GEOM_LIVE:
         return LIVE_PROVENANCE
+    if effective == GEOM_GENERATED:
+        return GENERATED_PROVENANCE
     return GOLDEN_PROVENANCE
 
 

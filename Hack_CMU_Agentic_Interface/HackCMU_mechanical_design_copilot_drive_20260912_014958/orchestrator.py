@@ -96,6 +96,7 @@ class Orchestrator:
         imported_candidate: Optional[ImportedCandidateGeometry] = None,
         topology_options: Optional[TopologySolverOptions] = None,
         topology_log=None,
+        warm_start_generator=None,
     ) -> None:
         self.state = DesignState()
         self.fixtures = fixtures or IntegrationFixtures()
@@ -108,6 +109,10 @@ class Orchestrator:
         self.imported_candidate = imported_candidate
         self.topology_options = topology_options
         self.topology_log = topology_log
+        # Callable[[UserRequirements], Optional[ImportedCandidateGeometry]]: generates the
+        # warm-start candidate (e.g. Grok-written trimesh script) when none was imported.
+        self.warm_start_generator = warm_start_generator
+        self.warm_start_error: Optional[str] = None
         self._handlers = {
             WorkflowStage.REQUIREMENTS: self._handle_requirements,
             WorkflowStage.REQUEST_INFORMATION: self._handle_request_information,
@@ -255,6 +260,20 @@ class Orchestrator:
         if frame_error:
             self._block_contract(frame_error)
             return
+        if self.imported_candidate is None and self.warm_start_generator is not None:
+            self.warm_start_error = None
+            try:
+                generated = self.warm_start_generator(self.state.requirements)
+            except Exception as exc:  # noqa: BLE001 — generation failure never blocks the workflow
+                generated = None
+                self.warm_start_error = f"{type(exc).__name__}: {exc}"
+            if generated is not None:
+                self.imported_candidate = generated
+            else:
+                self.state.notes = (
+                    "Warm-start generation failed; continuing without a candidate mesh "
+                    f"(topology optimization will be mocked). {self.warm_start_error or ''}"
+                ).strip()
         if self.imported_candidate is not None:
             self.state.stage = WorkflowStage.CANDIDATE_FIT
             return
@@ -716,6 +735,11 @@ class Orchestrator:
                 return "Orchestrator", "geometry_contract_check", self.state.contract_error
             if self.fixtures.geometry is not None:
                 return "Yujie fixture", "load_geometry", "loaded Yujie mock fixture"
+            if self.warm_start_generator is not None:
+                if self.warm_start_error:
+                    return "warm-start generator", "generate_warm_start", f"failed: {self.warm_start_error}"
+                if self.imported_candidate is not None and self.imported_candidate.task == "generated":
+                    return "warm-start generator", "generate_warm_start", self.imported_candidate.provenance
             return "GeometryAgent", "run_geometry", "placeholder geometry agent"
         if started == WorkflowStage.CANDIDATE_FIT:
             result = self.state.candidate_fit
