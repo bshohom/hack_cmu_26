@@ -166,6 +166,46 @@ def _candidate_name() -> str:
     return name if name in CANDIDATES else "cupholder"
 
 
+def _registration_measurements() -> Optional[Dict[str, Any]]:
+    """surfcap target.json -> mm measurements with confidence (None when no path is given)."""
+    path = (st.session_state.get("reg_target_path") or "").strip()
+    if not path:
+        st.session_state.registration_meas = None
+        return None
+    cached = st.session_state.get("registration_meas")
+    if cached and cached.get("target_json") == path:
+        return cached
+    try:
+        from to_agent.ingest.surfcap import target_to_measurements
+
+        meas = target_to_measurements(path)
+    except Exception as exc:  # noqa: BLE001 — unreadable file or to_agent missing
+        meas = {"target_json": path, "error": f"{type(exc).__name__}: {exc}", "confidence": 0.0, "prefill": False}
+    st.session_state.registration_meas = meas
+    return meas
+
+
+def _live_registration():
+    """RegistrationOutput from a trusted surfcap measurement, else None (mock fixture stays)."""
+    from schemas import RegistrationOutput
+
+    meas = st.session_state.get("registration_meas")
+    if not meas or meas.get("error") or not meas.get("confidence"):
+        return None
+    normal = tuple(float(v) for v in (meas.get("mount_normal") or (0.0, 0.0, 1.0)))
+    return RegistrationOutput(
+        is_mock=False,
+        frame_id="desk_edge_frame",
+        desk_plane_point_mm=(0.0, 0.0, float(meas.get("desk_thickness_mm") or 0.0)),
+        desk_plane_normal=normal,
+        confidence=float(meas["confidence"]),
+        notes=(
+            f"surfcap registration ({meas.get('thickness_source')}); desk thickness "
+            f"{meas.get('desk_thickness_mm')} mm; {'; '.join(meas.get('notes', [])[:3])}"
+        ),
+    )
+
+
 def _new_orchestrator() -> Orchestrator:
     mode = effective_geometry_mode(st.session_state.get("mode_geom"))
     return Orchestrator(
@@ -472,6 +512,9 @@ def _sync_orch_fixtures() -> None:
         return
     mode = st.session_state.get("mode_geom")
     orch.fixtures = fixtures_for_geometry_mode(mode, topology_live=_topology_live())
+    live_reg = _live_registration()
+    if live_reg is not None:
+        orch.fixtures.registration = live_reg
     orch.imported_candidate = imported_candidate_for_mode(mode, _candidate_name())
     orch.topology_options = _topology_options()
     orch.warm_start_generator = _warm_start_generator()
@@ -1098,8 +1141,27 @@ with st.sidebar:
         "Adaptive Synthetic Geometry. Registration, Analysis, Topology, and CAD remain mocked. "
         "Golden Fixture is a regression / integration test, not the normal experiment."
     )
-    st.radio("Registration", ["Mock Fixture", "Live"], index=0, disabled=True, key="mode_reg")
-    st.caption("Live implementation not connected yet.")
+    st.text_input(
+        "Registration target.json (surfcap, optional)",
+        key="reg_target_path",
+        placeholder="/path/to/out/<scene>/target.json",
+        help="Output of Aman's photo registration pipeline. Measurements are used only when their confidence is high; otherwise the user is asked.",
+    )
+    _reg = _registration_measurements()
+    if _reg is None:
+        st.caption("Registration: not provided — desk thickness comes from the structured questions.")
+    elif _reg.get("error"):
+        st.warning(f"Registration file could not be read: {_reg['error']}")
+    elif _reg.get("prefill"):
+        st.caption(
+            f"Registration LIVE: desk thickness {_reg['desk_thickness_mm']} mm "
+            f"({_reg['thickness_source']}, confidence {_reg['confidence']:.2f}) — pre-fills the question for confirmation."
+        )
+    else:
+        st.caption(
+            f"Registration confidence {_reg['confidence']:.2f} is too low to trust "
+            f"(desk thickness {_reg.get('desk_thickness_mm')} mm); the user will be asked. {'; '.join(_reg.get('notes', [])[:2])}"
+        )
     st.radio(
         "Geometry source",
         GEOM_MODE_OPTIONS,
@@ -1385,10 +1447,18 @@ with left:
     if state.stage == WorkflowStage.REQUEST_INFORMATION and state.clarifications:
         st.markdown("**Clarification questions**")
         st.caption("These questions come from InteractionAgent via the Orchestrator.")
+        reg_meas = st.session_state.get("registration_meas") or {}
         for question in state.clarifications:
             field = question.field
             widget_key = f"ans_{field}"
             current_val = st.session_state.answers.get(field)
+            if (
+                field == "desk_thickness_mm"
+                and current_val in (None, "", 0.0)
+                and reg_meas.get("prefill")
+                and widget_key not in st.session_state
+            ):
+                current_val = reg_meas["desk_thickness_mm"]
             if widget_key not in st.session_state:
                 if field in NUMERIC_FIELDS:
                     st.session_state[widget_key] = (
@@ -1413,6 +1483,20 @@ with left:
             else:
                 st.text_input(label, key=widget_key, help=question.question)
             st.session_state.answers[field] = st.session_state[widget_key]
+            if field == "desk_thickness_mm" and reg_meas.get("desk_thickness_mm") is not None:
+                reg_val = float(reg_meas["desk_thickness_mm"])
+                entered = float(st.session_state[widget_key] or 0.0)
+                if reg_meas.get("prefill") and abs(entered - reg_val) <= 2.0:
+                    st.caption(f"From registration: {reg_val} mm (confidence {reg_meas['confidence']:.2f}). Confirm or edit.")
+                elif reg_meas.get("prefill"):
+                    st.warning(
+                        f"You entered {entered:g} mm but registration measured {reg_val} mm "
+                        f"(confidence {reg_meas['confidence']:.2f}). Your value is used; the disagreement is recorded."
+                    )
+                else:
+                    st.caption(
+                        f"Registration measured {reg_val} mm but with low confidence ({reg_meas['confidence']:.2f}); please enter the measured value."
+                    )
         if "no_drill" not in st.session_state:
             st.session_state.no_drill = True
         extra = st.checkbox("No drilling allowed", key="no_drill")

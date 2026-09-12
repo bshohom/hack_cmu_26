@@ -40,3 +40,7 @@ def test_cupholder_live(tmp_path):
     assert out["compliance"] > 0
     assert "requested volume fraction 0.4" in out["notes"]
     assert 0 < out["volume_fraction"] < 1
+    pc = out["post_check"]
+    assert pc is not None and pc["is_mock"] is False and pc["is_safety_validation"] is False
+    assert pc["max_displacement_mm"] > 0 and pc["max_stress_pa"] > 0
+    assert pc["factor_of_safety"] is not None and pc["factor_of_safety"] > 0

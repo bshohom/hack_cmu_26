@@ -277,6 +277,18 @@ def topology_output(outcome: RunOutcome, candidate: dict, problem: TOProblem, no
             f"WARNING: the rho>=0.5 isosurface has {components} disconnected bodies; the load path is "
             "not fully solid at this volume fraction — raise volume_fraction or max_iters and rerun"
         )
+    post_check = None
+    check = s.get("post_check") or {}
+    if "worst_case" in check:
+        from .postcheck import to_analysis_output
+
+        post_check = to_analysis_output(check)
+        w = check["worst_case"]
+        fos = f"{w['factor_of_safety']:.2f}" if w["factor_of_safety"] else "n/a"
+        notes.append(
+            f"post-check at nominal load ({w['load_case_id']}): max displacement {w['max_displacement_mm']:.3f} mm, "
+            f"max von Mises {w['max_von_mises_MPa']:.2f} MPa, factor of safety {fos}"
+        )
     return {
         "is_mock": False,
         "compliance": float(s["compliance"][-1]),
@@ -295,4 +307,5 @@ def topology_output(outcome: RunOutcome, candidate: dict, problem: TOProblem, no
             f"estimate {s['estimate']['total_sec']:.0f} s, actual {s['wall_time_s']:.0f} s",
         ]),
         "problem_report": {k: v for k, v in report.items() if k != "dims"},
+        "post_check": post_check,
     }

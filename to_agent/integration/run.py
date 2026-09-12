@@ -69,8 +69,22 @@ def run_problem(
     save_history_png(result.compliance, result.volume, out_dir / "history.png")
     _, render_mode = save_render_png(mesh, result.rho, out_dir / "render.png", threshold)
     save_problem(problem, out_dir / "problem.yaml", header="Resolved problem as run (paths absolute).")
+    try:
+        from .postcheck import post_check
+
+        check = post_check(problem, mesh, masks, result.rho, dev, threshold)
+        if log:
+            w = check["worst_case"]
+            fos = f"{w['factor_of_safety']:.2f}" if w["factor_of_safety"] else "n/a"
+            log(
+                f"post-check ({w['load_case_id']}, nominal load): max disp {w['max_displacement_mm']:.3f} mm, "
+                f"max von Mises {w['max_von_mises_MPa']:.2f} MPa, FoS {fos}"
+            )
+    except Exception as exc:  # noqa: BLE001 — the check must never break a finished run
+        check = {"error": f"{type(exc).__name__}: {exc}"}
 
     summary = {
+        "post_check": check,
         "out_dir": str(out_dir),
         "device": result.device,
         "device_desc": describe_device(dev),
