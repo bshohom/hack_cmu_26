@@ -445,6 +445,17 @@ class AnalysisOutput(BaseModel):
     )
 
 
+class TopologySolverOptions(BaseModel):
+    """Optional knobs for the live optimizer (to_agent). None = template defaults."""
+
+    element_size_mm: Optional[float] = None
+    max_iters: Optional[int] = None
+    volume_fraction: Optional[float] = None
+    safety_factor: Optional[float] = None
+    time_budget_s: float = 150.0
+    device: str = "auto"  # auto | cuda | cpu
+
+
 class TopologyInput(BaseModel):
     design_domain: PartGeometry
     fixed_regions: List[AttachmentRegion] = Field(default_factory=list)
@@ -453,6 +464,10 @@ class TopologyInput(BaseModel):
     material: str = "PLA"
     target_volume_fraction: float = 0.4
     max_part_mass_kg: Optional[float] = None
+    # Integration (Shohom): the warm-start candidate whose mesh frame is the problem frame.
+    candidate: Optional["ImportedCandidateGeometry"] = None
+    desk_thickness_mm: Optional[float] = None
+    solver_options: Optional[TopologySolverOptions] = None
 
 
 class TopologyOutput(BaseModel):
@@ -463,6 +478,14 @@ class TopologyOutput(BaseModel):
     optimized_geometry_ref: str = "mock://optimized_mesh"
     solver_status: str = "mock_converged"
     model: str = "placeholder-surrogate"
+    # Live-run details (empty for mocks)
+    artifacts: Dict[str, str] = Field(default_factory=dict)
+    notes: str = ""
+    iterations: Optional[int] = None
+    wall_time_s: Optional[float] = None
+    converged: Optional[bool] = None
+    post_check: Optional[AnalysisOutput] = None  # linear FE check of the optimized design
+    problem_report: Dict[str, Any] = Field(default_factory=dict)
 
 
 class CadInput(BaseModel):
@@ -508,6 +531,12 @@ class ImportedCandidateGeometry(BaseModel):
     bbox_max_mm: Optional[Vec3] = None
     is_mock: bool = False
     provenance: str = "external generated concept geometry"
+    # Integration fields (defaulted; older fixtures stay valid)
+    candidate_name: str = "cupholder"
+    task: str = "cupholder"  # builder key in to_agent.demo.registry, or "generated"
+    dimensions: Dict[str, float] = Field(default_factory=dict)  # every numeric line of the dimensions file
+    frame: str = "candidate_mesh_frame"  # "desk_edge_frame" for generated warm starts
+    regions_path: Optional[str] = None  # <name>_regions.json (load / mounts / keep_out boxes)
 
 
 class CandidateFitStatus(str, Enum):
@@ -591,3 +620,6 @@ class TraceEvent(BaseModel):
     decision: Optional[str] = None
     fields_changed: List[str] = Field(default_factory=list)
     notes: str = ""
+
+
+TopologyInput.model_rebuild()

@@ -77,52 +77,43 @@ def run(
     threshold: float = typer.Option(0.5, help="Density iso-level for the STL"),
 ):
     """Run SIMP and write rho.vti, design.stl, history.png, render.png, result.json."""
-    from .postprocess.export import save_stl, save_vti
-    from .postprocess.viz import save_history_png, save_render_png
-    from .solver.simp import optimize
+    from .integration.run import CostTooHigh, run_problem
 
-    dev = pick_device(device)
     prob = load_problem(problem)
-    est = estimate_cost(prob, device=device, element_size=elem, iters=iters)
-    typer.echo(f"device: {describe_device(dev)}")
-    typer.echo(f"estimate [{est.level}]: {est.message}")
-    if est.level == "too_big" and not force:
+    if elem:
+        prob.target_element_size = elem
+    if iters:
+        prob.max_iters = iters
+    if volfrac:
+        prob.volume_fraction = volfrac
+    try:
+        outcome = run_problem(prob, out, device=device, threshold=threshold, force=force, log=typer.echo)
+    except CostTooHigh:
         typer.echo("refusing to run; pass --force to override", err=True)
         raise typer.Exit(code=2)
-
-    prob, mesh, masks = _prepare(problem, elem, iters, volfrac)
-    typer.echo("masks: " + json.dumps(masks.report))
-    result = optimize(prob, mesh, masks, dev, log=typer.echo)
-
-    out.mkdir(parents=True, exist_ok=True)
-    u0 = result.u[0] if result.u else None
-    save_vti(mesh, result.rho, out / "rho.vti", u=u0)
-    stl_info = save_stl(mesh, result.rho, out / "design.stl", threshold)
-    save_history_png(result.compliance, result.volume, out / "history.png")
-    _, render_mode = save_render_png(mesh, result.rho, out / "render.png", threshold)
-    save_problem(prob, out / "problem.yaml", header="Resolved problem as run (paths absolute).")
-
-    summary = {
-        "device": result.device,
-        "solver_mode": result.solver_mode,
-        "iters": result.iters,
-        "converged": result.converged,
-        "wall_time_s": round(result.wall_time, 2),
-        "estimate_total_s": round(est.total_sec, 1),
-        "compliance": result.compliance,
-        "volume_fraction": result.volume,
-        "change": result.change,
-        "final_volume_fraction": result.volume[-1] if result.volume else None,
-        "masks": masks.report,
-        "stl": stl_info,
-        "render": render_mode,
-    }
-    (out / "result.json").write_text(json.dumps(summary, indent=2))
+    s = outcome.summary
     typer.echo(
-        f"done: {result.iters} iters in {result.wall_time:.1f}s (est {est.total_sec:.0f}s), "
-        f"C {result.compliance[0]:.4g} -> {result.compliance[-1]:.4g}, vol {result.volume[-1]:.3f}; "
-        f"outputs in {out}/ (render: {render_mode})"
+        f"done: {s['iters']} iters in {s['wall_time_s']:.1f}s (est {s['estimate']['total_sec']:.0f}s), "
+        f"C {s['compliance'][0]:.4g} -> {s['compliance'][-1]:.4g}, vol {s['final_volume_fraction']:.3f}; "
+        f"outputs in {out}/ (render: {s['render']})"
     )
+
+
+@app.command("run-agentic")
+def run_agentic(
+    input: Path = typer.Argument(..., help="JSON file with the interface's TopologyInput (model_dump)"),
+    out_root: Path = typer.Option(Path("out/agentic"), help="Root for per-run output directories"),
+):
+    """Adapter entry point: TopologyInput JSON -> live optimization -> TopologyOutput JSON on stdout."""
+    from .integration.agentic import AdapterError, run_topology
+
+    data = json.loads(input.read_text())
+    try:
+        result = run_topology(data, out_root=out_root, log=lambda m: typer.echo(m, err=True))
+    except AdapterError as exc:
+        typer.echo(json.dumps({"is_mock": True, "notes": str(exc)}))
+        raise typer.Exit(code=2)
+    typer.echo(json.dumps(result, indent=2))
 
 
 @app.command("make-cupholder-problem")

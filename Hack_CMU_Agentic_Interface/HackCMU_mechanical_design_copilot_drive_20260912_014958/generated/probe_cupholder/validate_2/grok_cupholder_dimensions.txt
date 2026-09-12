@@ -1,0 +1,22 @@
+grok_cupholder — generated warm start
+Units: mm
+
+DESIGN DIMENSIONS
+- Holder inner diameter: 89.0
+- Holder height: 55.0
+- Max protrusion: 130.0
+- Clamp gap: 26.5
+- Wall thickness: 4.5
+
+NOTES
+- Clamp gap 26.5mm for 25mm desk + clearance
+- 4.5mm walls for PLA strength
+- Single connected watertight body
+
+MESH
+- Vertices: 352
+- Faces: 704
+- Watertight: True
+- Connected components: 1
+- Bounding box min: [-42.0, -49.0, -6.5]
+- Bounding box max: [130.0, 49.0, 55.0]

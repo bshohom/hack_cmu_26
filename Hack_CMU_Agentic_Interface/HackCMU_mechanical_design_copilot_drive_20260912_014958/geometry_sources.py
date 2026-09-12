@@ -80,7 +80,8 @@ def uses_synthetic_geometry(mode: Optional[str]) -> bool:
     return effective_geometry_mode(mode) in {GEOM_ADAPTIVE, GEOM_IMPORTED}
 
 
-def fixtures_for_geometry_mode(mode: Optional[str]) -> IntegrationFixtures:
+def fixtures_for_geometry_mode(mode: Optional[str], topology_live: bool = False) -> IntegrationFixtures:
+    """`topology_live` drops the topology/CAD fixtures so the real tools run (to_agent)."""
     base = load_integration_fixtures()
     if uses_synthetic_geometry(mode):
         # Keep registration / topology / CAD fixtures. Drop geometry so GeometryAgent
@@ -90,8 +91,16 @@ def fixtures_for_geometry_mode(mode: Optional[str]) -> IntegrationFixtures:
             registration=base.registration,
             geometry=None,
             analysis=None,
-            topology=base.topology,
-            cad=base.cad,
+            topology=None if topology_live else base.topology,
+            cad=None if topology_live else base.cad,
+        )
+    if topology_live:
+        return IntegrationFixtures(
+            registration=base.registration,
+            geometry=base.geometry,
+            analysis=base.analysis,
+            topology=None,
+            cad=None,
         )
     return base
 

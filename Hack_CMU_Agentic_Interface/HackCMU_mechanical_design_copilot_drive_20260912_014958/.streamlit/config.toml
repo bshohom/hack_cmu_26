@@ -1,0 +1,7 @@
+[server]
+# torch (imported lazily by the live topology tool) crashes Streamlit's module watcher.
+fileWatcherType = "none"
+headless = true
+
+[browser]
+gatherUsageStats = false

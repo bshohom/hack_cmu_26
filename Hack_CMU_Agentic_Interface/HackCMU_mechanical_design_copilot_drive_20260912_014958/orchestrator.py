@@ -36,6 +36,7 @@ from schemas import (
     SafetyStatus,
     StructureInput,
     TopologyInput,
+    TopologySolverOptions,
     TraceEvent,
     UserRequirements,
     VerificationResult,
@@ -93,6 +94,8 @@ class Orchestrator:
         max_structure_iterations: int = MAX_STRUCTURE_ITERATIONS,
         analysis_never_pass: bool = False,
         imported_candidate: Optional[ImportedCandidateGeometry] = None,
+        topology_options: Optional[TopologySolverOptions] = None,
+        topology_log=None,
     ) -> None:
         self.state = DesignState()
         self.fixtures = fixtures or IntegrationFixtures()
@@ -103,6 +106,8 @@ class Orchestrator:
         self.max_structure_iterations = max_structure_iterations
         self.analysis_never_pass = analysis_never_pass
         self.imported_candidate = imported_candidate
+        self.topology_options = topology_options
+        self.topology_log = topology_log
         self._handlers = {
             WorkflowStage.REQUIREMENTS: self._handle_requirements,
             WorkflowStage.REQUEST_INFORMATION: self._handle_request_information,
@@ -438,8 +443,11 @@ class Orchestrator:
                 material=material,
                 target_volume_fraction=0.4,
                 max_part_mass_kg=max_mass,
+                candidate=self.state.imported_candidate,
+                desk_thickness_mm=self.state.geometry.environment.desk_thickness_mm,
+                solver_options=self.topology_options,
             )
-            self.state.topology = run_topology_optimization(inp)
+            self.state.topology = run_topology_optimization(inp, log=self.topology_log)
         if self.state.analysis.is_mock or self.state.topology.is_mock:
             self.state.safety_status = SafetyStatus.UNVERIFIED
         self.state.stage = WorkflowStage.VERIFICATION
@@ -478,6 +486,14 @@ class Orchestrator:
             safety_validated = False
             safety_status = SafetyStatus.UNVERIFIED
             reason = "this prototype does not certify physical safety"
+        check = self.state.topology.post_check if self.state.topology is not None else None
+        if check is not None:
+            fos = f"{check.factor_of_safety:.2f}" if check.factor_of_safety is not None else "n/a"
+            reason += (
+                f"; post-TO linear FE check at nominal load: max displacement "
+                f"{check.max_displacement_mm:.3f} mm, max stress {check.max_stress_pa / 1e6:.2f} MPa, "
+                f"factor of safety {fos} (not a certification)"
+            )
 
         if not artifacts_ok:
             self.state.verification = VerificationResult(
@@ -739,6 +755,11 @@ class Orchestrator:
                 return "Orchestrator", "topology_prerequisite_check", self.state.contract_error
             if self.fixtures.topology is not None:
                 return "Shohom fixture", "load_topology", "loaded Shohom mock fixture"
+            topo = self.state.topology
+            if topo is not None and not topo.is_mock:
+                return "to_agent", "run_topology", topo.model
+            if topo is not None and topo.notes:
+                return "topology tool", "run_topology", f"placeholder topology tool ({topo.notes})"
             return "topology tool", "run_topology", "placeholder topology tool"
         if started == WorkflowStage.VERIFICATION:
             if self.state.stage != WorkflowStage.COMPLETE:
