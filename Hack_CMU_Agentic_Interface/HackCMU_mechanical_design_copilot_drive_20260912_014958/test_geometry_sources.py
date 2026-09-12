@@ -55,7 +55,7 @@ class GeometrySourceTests(unittest.TestCase):
         self.assertIsNone(orch.state.contract_error)
         geom = orch.state.geometry
         assert geom is not None
-        self.assertTrue(geom.is_mock)
+        self.assertFalse(geom.is_mock)
         self.assertEqual(geom.payload_object.bottle_diameter_mm, 100.0)
         self.assertEqual(geom.payload_object.filled_mass_kg, 1.0)
         self.assertEqual(geom.environment.desk_thickness_mm, 20.0)

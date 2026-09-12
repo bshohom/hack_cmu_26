@@ -376,6 +376,9 @@ class Orchestrator:
             return
         if self.imported_candidate is not None:
             self._emit("WARM_START_PRESENT", "existing candidate attached")
+        if self.imported_candidate is None and self.warm_start_generator is None:
+            print("[GEOMETRY] FROM_REQUIREMENTS — GeometryAgent path, no Grok", flush=True)
+            self._emit("FROM_REQUIREMENTS", "deterministic GeometryAgent / StructureAgent")
         if self.imported_candidate is None and self.warm_start_generator is not None:
             print("[GEOMETRY] GROK_CALL_SITE_REACHED", flush=True)
             self.warm_start_error = None

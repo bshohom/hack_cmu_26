@@ -1,7 +1,7 @@
 """UI-only fixture assembly for geometry source modes.
 
 Does not change Orchestrator transition or consistency semantics.
-Golden Fixture injects the existing Yujie fixture. Adaptive Synthetic Mock
+Golden Fixture injects the existing Yujie fixture. From requirements
 leaves geometry unset so GeometryAgent builds GeometryOutput from requirements.
 """
 
@@ -14,19 +14,32 @@ from imported_candidate import load_candidate, load_imported_candidate
 from schemas import ImportedCandidateGeometry, IntegrationFixtures
 from state import DesignState
 
-GEOM_ADAPTIVE = "Adaptive Synthetic Mock"
+GEOM_FROM_REQUIREMENTS = "From requirements"
+GEOM_ADAPTIVE = GEOM_FROM_REQUIREMENTS  # historical alias; same deterministic path
 GEOM_IMPORTED = "Imported Candidate Geometry"
 GEOM_GENERATED = "Generated Warm Start (Grok)"
 GEOM_GOLDEN = "Golden Fixture"
 GEOM_LIVE = "Live Geometry"
 
-GEOM_MODE_OPTIONS = [GEOM_ADAPTIVE, GEOM_IMPORTED, GEOM_GENERATED, GEOM_GOLDEN, GEOM_LIVE]
+_GEOM_ALIASES = {
+    "Adaptive Synthetic Mock": GEOM_FROM_REQUIREMENTS,
+}
+
+GEOM_MODE_OPTIONS = [
+    GEOM_FROM_REQUIREMENTS,
+    GEOM_GENERATED,
+    GEOM_IMPORTED,
+    GEOM_GOLDEN,
+    GEOM_LIVE,
+]
 
 GOLDEN_PROVENANCE = "Fixed golden integration fixture. Regression / integration test."
-ADAPTIVE_PROVENANCE = (
-    "Synthetic geometry generated from user-entered requirements. "
-    "The uploaded image was NOT geometrically reconstructed."
+FROM_REQUIREMENTS_PROVENANCE = (
+    "Deterministic engineering geometry from the structured requirements "
+    "(GeometryAgent + StructureAgent). Same answers produce the same problem. "
+    "Not reconstructed scene geometry and not a Grok mesh."
 )
+ADAPTIVE_PROVENANCE = FROM_REQUIREMENTS_PROVENANCE
 IMPORTED_PROVENANCE = (
     "external generated concept geometry. "
     "Not Yujie GeometryOutput and not reconstructed scene geometry."
@@ -77,13 +90,22 @@ _COMPARE_FIELDS = [
 
 
 def effective_geometry_mode(mode: Optional[str]) -> str:
+    mode = _GEOM_ALIASES.get(mode or "", mode)
     if mode in GEOM_MODE_OPTIONS:
         return mode
-    return GEOM_ADAPTIVE
+    return GEOM_FROM_REQUIREMENTS
+
+
+def uses_warm_start_generator(mode: Optional[str]) -> bool:
+    return effective_geometry_mode(mode) == GEOM_GENERATED
 
 
 def uses_synthetic_geometry(mode: Optional[str]) -> bool:
-    return effective_geometry_mode(mode) in {GEOM_ADAPTIVE, GEOM_IMPORTED, GEOM_GENERATED}
+    return effective_geometry_mode(mode) in {
+        GEOM_FROM_REQUIREMENTS,
+        GEOM_IMPORTED,
+        GEOM_GENERATED,
+    }
 
 
 def fixtures_for_geometry_mode(mode: Optional[str], topology_live: bool = False) -> IntegrationFixtures:
@@ -125,8 +147,8 @@ def geometry_provenance_text(mode: Optional[str]) -> str:
     effective = effective_geometry_mode(mode)
     if effective == GEOM_IMPORTED:
         return IMPORTED_PROVENANCE
-    if effective == GEOM_ADAPTIVE:
-        return ADAPTIVE_PROVENANCE
+    if effective == GEOM_FROM_REQUIREMENTS:
+        return FROM_REQUIREMENTS_PROVENANCE
     if effective == GEOM_LIVE:
         return LIVE_PROVENANCE
     if effective == GEOM_GENERATED:

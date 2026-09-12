@@ -410,6 +410,10 @@ class InteractionAgent:
             req.payload.description = "assist_load"
             req.object_geometry.kind = "handle"
             req.environment.kind = "bed"
+        elif task == TASK_GENERIC:
+            req.payload.description = req.payload.description or "object"
+            if req.object_geometry.kind == "cylinder":
+                req.object_geometry.kind = "object"
         if "1 l" in lowered or "1l" in lowered or "one liter" in lowered:
             req.payload.volume_l = 1.0
         if "clamp" in lowered:

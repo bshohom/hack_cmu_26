@@ -122,7 +122,7 @@ class GeometryAgent:
             frame = inp.registration_frame
 
         return GeometryOutput(
-            is_mock=True,
+            is_mock=False,
             coordinate_frame=frame,
             environment=environment,
             payload_object=payload_object,
@@ -132,7 +132,7 @@ class GeometryAgent:
             attachment_regions=attachment_regions,
             load_regions=load_regions,
             notes=(
-                f"Simplified engineering geometry from measurements ({kind} payload). "
-                "Not exact CAD from an image."
+                f"Deterministic engineering geometry from structured requirements "
+                f"({kind} payload). Not reconstructed scene geometry."
             ),
         )

@@ -21,6 +21,7 @@ import streamlit.components.v1 as components
 from fixtures import load_clarifications, load_user_request
 from geometry_sources import (
     GEOM_ADAPTIVE,
+    GEOM_FROM_REQUIREMENTS,
     GEOM_GOLDEN,
     GEOM_GENERATED,
     GEOM_IMPORTED,
@@ -28,6 +29,7 @@ from geometry_sources import (
     GEOM_MODE_OPTIONS,
     chat_error_key,
     effective_geometry_mode,
+    uses_warm_start_generator,
     fixtures_for_geometry_mode,
     format_mismatch_message,
     geometry_provenance_text,
@@ -424,7 +426,7 @@ def _session_warm_start_candidate():
 
 def _warm_start_generator():
     """Generator callable for the GEOMETRY stage when the geometry source is Grok-generated."""
-    if effective_geometry_mode(st.session_state.get("mode_geom")) != GEOM_GENERATED:
+    if not uses_warm_start_generator(st.session_state.get("mode_geom")):
         return None
     load_dotenv()
     load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -723,13 +725,13 @@ def _geometry_mode_label(mode: str) -> str:
     if mode == GEOM_IMPORTED:
         return "Imported Candidate Geometry"
     if mode == GEOM_GENERATED:
-        return "Generated Warm Start (Grok)"
-    return "Adaptive Synthetic Mock"
+        return "Generated Warm Start (Grok)  —  optional"
+    return "From requirements  —  deterministic geometry from your answers"
 
 
 def _default_geometry_mode() -> str:
-    """Product default: Grok warm-start generation. Mock / adaptive is developer-only."""
-    return GEOM_GENERATED
+    """Product default: deterministic GeometryAgent path. Grok is optional."""
+    return GEOM_FROM_REQUIREMENTS
 
 
 def _init_session() -> None:
@@ -1012,7 +1014,7 @@ def _on_bottle_case() -> None:
     registration = st.session_state.get("registration_meas") or {}
     if registration.get("prefill") and registration.get("desk_thickness_mm") is not None:
         answers["desk_thickness_mm"] = float(registration["desk_thickness_mm"])
-    st.session_state.mode_geom = GEOM_ADAPTIVE
+    st.session_state.mode_geom = GEOM_FROM_REQUIREMENTS
     st.session_state.mode_topo = "Live"
     _queue_request_text(SMALL_BOTTLE_CASE_MESSAGE)
     _reset(ingest_message=SMALL_BOTTLE_CASE_MESSAGE, prefill_happy=False)
@@ -1435,7 +1437,7 @@ def _run_with_progress(orch: Orchestrator, *, progress_kind: str | None = None, 
         elif orch.warm_start_generator is not None:
             kind = "generate"
         else:
-            kind = "optimize"
+            kind = "from_requirements"
     caption = progress_caption(kind)
 
     def on_progress(it: int, total: int, compliance: float) -> None:
@@ -2867,7 +2869,7 @@ def _render_developer_controls(*, include_registration_input: bool = True) -> No
         GEOM_MODE_OPTIONS,
         key="mode_geom",
         format_func=_geometry_mode_label,
-        help="Adaptive is the default experiment. Imported Candidate loads the external OBJ. Golden Fixture is regression only. Live is not connected.",
+        help="From requirements is the default demo path. Generated Warm Start (Grok) is optional. Golden Fixture is regression only.",
     )
     if st.session_state.mode_geom == GEOM_LIVE:
         st.caption("Live Geometry — not connected.")
@@ -2900,7 +2902,7 @@ def _render_developer_controls(*, include_registration_input: bool = True) -> No
         else:
             st.warning(f"{API_NOT_CONNECTED}. {_grok.not_connected_reason}")
     else:
-        st.caption(geometry_provenance_text(GEOM_ADAPTIVE))
+        st.caption(geometry_provenance_text(GEOM_FROM_REQUIREMENTS))
     st.radio("Analysis", ["Mock Fixture", "Live"], index=0, disabled=True, key="mode_analysis")
     st.caption("Live analysis is not connected. This control is informational and is not a product toggle.")
     if _mock_fixtures_enabled():

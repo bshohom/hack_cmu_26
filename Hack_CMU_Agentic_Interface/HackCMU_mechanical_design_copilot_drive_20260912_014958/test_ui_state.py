@@ -315,14 +315,14 @@ class StreamlitWidgetOwnershipTests(unittest.TestCase):
         self.assertIn("100", "".join(item["text"] for item in at.session_state.chat))
         self.assertIn("85", "".join(item["text"] for item in at.session_state.chat))
 
-    def test_new_session_defaults_to_generated_warm_start(self) -> None:
-        """Product defaults: Grok generation + live topology. Mock is an explicit opt-in."""
+    def test_new_session_defaults_to_from_requirements(self) -> None:
+        """Product defaults: deterministic From requirements + live topology. Grok is optional."""
         from app import _default_geometry_mode
-        from geometry_sources import GEOM_GENERATED
+        from geometry_sources import GEOM_FROM_REQUIREMENTS
 
         at = self._app()
         self.assertEqual(at.session_state.mode_geom, _default_geometry_mode())
-        self.assertEqual(at.session_state.mode_geom, GEOM_GENERATED)
+        self.assertEqual(at.session_state.mode_geom, GEOM_FROM_REQUIREMENTS)
         self.assertEqual(at.session_state.mode_topo, "Live")
         self.assertFalse(at.session_state.enable_mock_fixtures)
         self.assertEqual(at.session_state.mode_reason, "Grok")

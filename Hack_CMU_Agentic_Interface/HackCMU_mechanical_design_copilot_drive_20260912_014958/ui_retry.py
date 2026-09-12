@@ -13,6 +13,7 @@ TOPOLOGY_RETRY_STAGES = {STAGE_OPTIMIZATION, STAGE_NONCONVERGED}
 
 PROGRESS_RETRY_TOPOLOGY = "Retrying topology optimization..."
 PROGRESS_GENERATE = "Generating the warm-start mesh from your measurements…"
+PROGRESS_FROM_REQUIREMENTS = "Building the design from your requirements…"
 PROGRESS_OPTIMIZE = "Generating preliminary optimized design…"
 
 
@@ -47,4 +48,6 @@ def progress_caption(kind: Optional[str]) -> str:
         return PROGRESS_RETRY_TOPOLOGY
     if kind == REGENERATE_DESIGN or kind == "generate":
         return PROGRESS_GENERATE
+    if kind == "from_requirements":
+        return PROGRESS_FROM_REQUIREMENTS
     return PROGRESS_OPTIMIZE

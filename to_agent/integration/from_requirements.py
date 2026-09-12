@@ -54,11 +54,16 @@ def _load_geometry(topology_input: dict, env: Envelope, desk_t: float, payload_s
         x = 0.45 * env.max_protrusion_mm
         z = desk_t + max(40.0, 0.5 * env.max_height_mm)
         patch = (max(payload_size, 40.0), max(payload_size, 40.0))
-    else:
+    elif kind == "cylinder":
         # A cup/bottle holder: the payload rests on a floor above the desk plane.
         x = 0.8 * env.max_protrusion_mm
         z = desk_t + 10.0
         patch = (max(payload_size, 40.0), max(payload_size, 40.0))
+    else:
+        # Generic support/load: use the structured load region when present.
+        x = 0.55 * env.max_protrusion_mm
+        z = desk_t + 0.35 * env.max_height_mm
+        patch = (max(payload_size, 24.0), max(payload_size, 24.0))
     if pos and len(pos) == 3 and any(abs(float(v)) > 1e-6 for v in pos):
         x, z = float(pos[0]), float(pos[2])
     return kind, x, z, patch
