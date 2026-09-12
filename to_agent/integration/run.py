@@ -11,7 +11,7 @@ from .. import device as _device  # noqa: F401
 from ..contracts import TOProblem, save_problem
 from ..cost import CostEstimate, estimate_cost
 from ..device import describe_device, pick_device
-from ..meshing.masks import Masks, build_masks
+from ..meshing.masks import Masks, ProblemSetupError, build_masks
 from ..meshing.voxel_backend import HexMesh, build_hex_grid
 from ..postprocess.connectivity import carries_boundary_conditions, keep_largest_component
 from ..postprocess.export import save_stl, save_vti
@@ -38,7 +38,23 @@ class RunOutcome:
 
 def prepare(problem: TOProblem) -> tuple[HexMesh, Masks]:
     mesh = build_hex_grid(resolve_domain(problem), problem.target_element_size)
-    return mesh, build_masks(problem, mesh)
+    masks = build_masks(problem, mesh)
+    from .bc_validation import validate_required_bcs
+
+    bc = validate_required_bcs(problem, mesh, masks.void)
+    masks.report["bc_validation"] = bc
+    if bc["hard_infeasible"]:
+        dead = [
+            f"{r['kind']} {r['id']}"
+            for r in bc["regions"]
+            if r["status"] == "hard_infeasible"
+        ]
+        raise ProblemSetupError(
+            "hard infeasible: required "
+            + ", ".join(dead)
+            + " has no nodes incident to a non-void element"
+        )
+    return mesh, masks
 
 
 def run_problem(

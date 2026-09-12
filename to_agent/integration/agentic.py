@@ -213,6 +213,12 @@ def build_from_registry(candidate: dict, topology_input: dict, h: float, volfrac
     report["region_source"] = apply_agent_regions(problem, regions_in_mesh_frame(topology_input, desk_to_mesh), h)
     report["region_position_source"] = topology_input.get("_region_position_source", "agent")
     report["bound_regions"] = list(topology_input.get("_bound_regions") or [])
+    if task == "desk_bag_hook" and report.get("hook") and report["region_source"]:
+        from ..demo.hook import HookGeometry, reconcile_hook_boundary_conditions
+
+        report["region_source"].extend(
+            reconcile_hook_boundary_conditions(problem, HookGeometry(**report["hook"]), h)
+        )
     if desk_to_mesh is not None:
         report["registration"] = {
             "from_frame": ENVELOPE_FRAME,
@@ -968,10 +974,32 @@ def acceptance_checks(
     ) and _unknown(checks.get(k))]
     converged = bool(s.get("converged"))
     checks["converged"] = converged
+    masks_rep = (getattr(outcome, "summary", None) or {}).get("masks") or {}
+    bc = report.get("bc_validation") or masks_rep.get("bc_validation")
+    checks["bc_validation"] = bc
+    checks["optional_candidate_clipped_by_keepout"] = masks_rep.get(
+        "optional_candidate_clipped_by_keepout",
+        report.get("optional_candidate_clipped_by_keepout"),
+    )
+    if bc:
+        for region in bc.get("regions") or []:
+            if region.get("status") == "partial":
+                reasons.append(
+                    f"{region['kind']} {region['id']} only {region['usable_fraction']:.0%} "
+                    "of requested nodes are incident to a non-void element"
+                )
     hard_infeasible = bool((report.get("envelope_constraint") or {}).get("hard_infeasible"))
     if hard_infeasible:
         checks["acceptance_status"] = "fail"
         reasons.append("hard infeasible: a required support lies entirely outside the user envelope")
+    elif bc and bc.get("hard_infeasible"):
+        checks["acceptance_status"] = "fail"
+        dead = [
+            f"{r['kind']} {r['id']}"
+            for r in (bc.get("regions") or [])
+            if r.get("status") == "hard_infeasible"
+        ]
+        reasons.append("hard infeasible: required " + ", ".join(dead) + " has no usable non-void nodes")
     elif not converged:
         checks["acceptance_status"] = "unresolved_not_converged"
     elif checks["failed"] or checks["unknown"]:
@@ -995,6 +1023,12 @@ def topology_output(
     topology_input = topology_input or {}
     unsupported = unsupported or []
     s = outcome.summary
+    if outcome.masks is not None:
+        report.setdefault("bc_validation", outcome.masks.report.get("bc_validation"))
+        report.setdefault(
+            "optional_candidate_clipped_by_keepout",
+            outcome.masks.report.get("optional_candidate_clipped_by_keepout"),
+        )
     acceptance = acceptance_checks(outcome, problem, topology_input, report=report)
     v_candidate = _mesh_volume(candidate.get("mesh_path"))
     v_design = s["stl"].get("volume_mm3")
