@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import traceback
 from pathlib import Path
@@ -23,12 +24,71 @@ import trimesh
 
 N_PARTICLES = 75_000
 MAX_FACES = 600_000
+TRIMESH_VERSION = getattr(trimesh, "__version__", "unknown")
+
+
+def cleanup_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Approved cleanup for the installed trimesh (no remove_duplicate_faces)."""
+    if mesh is None:
+        return mesh
+    out = mesh.copy()
+    out.merge_vertices()
+    out.update_faces(out.unique_faces())
+    out.remove_unreferenced_vertices()
+    out.process(validate=True)
+    return out
+
+
+def union_all(parts) -> trimesh.Trimesh:
+    """Deterministic solid assembly. concatenate() is not a valid substitute."""
+    meshes = []
+    for part in parts or []:
+        if part is None:
+            continue
+        if not isinstance(part, trimesh.Trimesh):
+            raise TypeError(f"union_all() expects trimesh.Trimesh parts, got {type(part).__name__}")
+        if part.is_empty or len(part.faces) == 0:
+            continue
+        meshes.append(part)
+    if not meshes:
+        raise ValueError("union_all() received no meshes")
+    if len(meshes) == 1:
+        return meshes[0].copy()
+    try:
+        result = trimesh.boolean.union(meshes, engine="manifold", check_volume=False)
+    except Exception as exc:  # noqa: BLE001 — reported to the generator
+        raise RuntimeError(
+            "union_all() failed with the installed manifold engine "
+            f"({type(exc).__name__}: {exc}). Overlap adjoining primitives by >= 1 mm; "
+            "coincident faces are not enough. Do not use trimesh.util.concatenate."
+        ) from exc
+    if result is None:
+        raise RuntimeError("union_all() returned None. Overlap adjoining primitives by >= 1 mm.")
+    if isinstance(result, (list, tuple)):
+        raise RuntimeError(
+            f"union_all() produced {len(result)} separate solids. "
+            "Primitives must volumetrically overlap by >= 1 mm."
+        )
+    return result
+
+
+def _install_trimesh_compat() -> None:
+    """Map removed trimesh 3.x names onto 5.x equivalents for generated scripts."""
+    if not hasattr(trimesh.Trimesh, "remove_duplicate_faces"):
+        def remove_duplicate_faces(self) -> None:
+            self.update_faces(self.unique_faces())
+            self.remove_unreferenced_vertices()
+
+        trimesh.Trimesh.remove_duplicate_faces = remove_duplicate_faces  # type: ignore[attr-defined]
 
 
 def _load_script(path: Path):
     spec = importlib.util.spec_from_file_location("warmstart_script", path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    _install_trimesh_compat()
+    module.cleanup_mesh = cleanup_mesh
+    module.union_all = union_all
     spec.loader.exec_module(module)
     return module
 
@@ -49,17 +109,38 @@ def _box(region: dict) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(region["min"], float), np.asarray(region["max"], float)
 
 
-def validate(mesh: trimesh.Trimesh, regions: dict, envelope: dict) -> list[str]:
+def _final_assembly_is_concatenate(script_src: str) -> bool:
+    if "concatenate" not in (script_src or ""):
+        return False
+    returns = re.findall(r"^\s*return\s+(.+?)(?:#.*)?$", script_src, re.M)
+    if returns and "concatenate" in returns[-1]:
+        return True
+    last_concat = script_src.rfind("concatenate")
+    last_union = max(script_src.rfind("union_all("), script_src.rfind("boolean.union"))
+    return last_concat > last_union
+
+
+def validate(mesh: trimesh.Trimesh, regions: dict, envelope: dict, script_src: str = "") -> list[str]:
     problems: list[str] = []
     if mesh.is_empty or len(mesh.faces) == 0:
         return ["mesh has no faces"]
     if len(mesh.faces) > MAX_FACES:
         problems.append(f"too many faces ({len(mesh.faces)} > {MAX_FACES}); use fewer segments")
+    if _final_assembly_is_concatenate(script_src):
+        problems.append(
+            "ASSEMBLY REJECTED: final assembly uses trimesh.util.concatenate. That glues "
+            "triangle soups and cannot produce one solid. Overlap adjoining primitives by "
+            ">= 1 mm and return union_all(parts)."
+        )
     if not mesh.is_watertight:
-        problems.append("mesh is not watertight; union all bodies with trimesh.boolean.union(..., engine='manifold') and avoid coincident faces")
+        problems.append(
+            "mesh is not watertight; overlap adjoining primitives by >= 1 mm and assemble with "
+            "union_all(parts). Coincident faces and concatenate() are not enough."
+        )
     parts = mesh.split(only_watertight=False)
     if len(parts) != 1:
         problems.append(f"mesh has {len(parts)} disconnected bodies; it must be one connected body")
+        problems.extend(_component_diagnostics(parts))
     if mesh.is_watertight and mesh.volume <= 0:
         problems.append("mesh volume is not positive (inverted normals?)")
     lo, hi = mesh.bounds
@@ -83,8 +164,7 @@ def validate(mesh: trimesh.Trimesh, regions: dict, envelope: dict) -> list[str]:
             problems.append(
                 f"REGIONS['load'] box {np.round(lmin,1).tolist()}..{np.round(lmax,1).tolist()} lies outside the "
                 f"part bounds {np.round(lo,1).tolist()}..{np.round(hi,1).tolist()}. It must be a slab of YOUR "
-                "material where the payload presses on the part (cup floor / hook arm top face / platform top), "
-                "not the payload's own position or the empty space it hangs in."
+                "material on the load-bearing face, not empty space or the payload volume."
             )
         else:
             problems += _region_touches_part(mesh, load, "REGIONS['load']")
@@ -96,6 +176,48 @@ def validate(mesh: trimesh.Trimesh, regions: dict, envelope: dict) -> list[str]:
         if m is not None:
             problems += _region_touches_part(mesh, m, f"REGIONS['mounts'][{i}] ({m.get('name', '')})")
     return problems
+
+
+def _nearest_component_distance(a: trimesh.Trimesh, b: trimesh.Trimesh) -> float:
+    try:
+        pts, _ = trimesh.sample.sample_surface(a, 250)
+        _, dist, _ = trimesh.proximity.closest_point(b, pts)
+        return float(np.min(dist))
+    except Exception:  # noqa: BLE001 — fall back to bounding-box gap
+        alo, ahi = a.bounds
+        blo, bhi = b.bounds
+        gap = np.maximum(alo - bhi, blo - ahi)
+        return float(np.linalg.norm(np.maximum(gap, 0.0)))
+
+
+def _component_diagnostics(parts: list) -> list[str]:
+    lines: list[str] = []
+    for i, part in enumerate(parts):
+        lo, hi = part.bounds
+        lines.append(
+            f"  component[{i}] bbox {np.round(lo, 2).tolist()} .. {np.round(hi, 2).tolist()}"
+        )
+    min_d = None
+    pair = None
+    for i in range(len(parts)):
+        for j in range(i + 1, len(parts)):
+            dist = _nearest_component_distance(parts[i], parts[j])
+            if min_d is None or dist < min_d:
+                min_d = dist
+                pair = (i, j)
+    if pair is not None and min_d is not None:
+        if min_d <= 1e-3:
+            lines.append(
+                f"  nearest gap: component[{pair[0]}] to component[{pair[1]}] = 0 mm "
+                "(they touch or nearly touch but were not boolean-unioned). "
+                "Overlap those two by >= 1 mm and return union_all(parts)."
+            )
+        else:
+            lines.append(
+                f"  nearest gap: component[{pair[0]}] to component[{pair[1]}] = {min_d:.2f} mm. "
+                "Move them so they overlap by >= 1 mm and return union_all(parts)."
+            )
+    return lines
 
 
 def _region_touches_part(mesh: trimesh.Trimesh, region: dict, label: str, tol_mm: float = 3.0, min_frac: float = 0.25) -> list[str]:
@@ -170,15 +292,15 @@ def main(argv: list[str]) -> int:
         module = _load_script(script)
         params = dict(getattr(module, "PARAMS", {}))
         mesh = module.build(params)
+        if isinstance(mesh, (list, tuple)):
+            mesh = union_all(mesh)
         if not isinstance(mesh, trimesh.Trimesh):
-            raise TypeError(f"build() must return trimesh.Trimesh, got {type(mesh).__name__}")
-        mesh = mesh.copy()
-        mesh.merge_vertices()
-        mesh.remove_unreferenced_vertices()
+            raise TypeError(f"build() must return trimesh.Trimesh or a list of parts, got {type(mesh).__name__}")
+        mesh = cleanup_mesh(mesh)
         regions = dict(getattr(module, "REGIONS", {}))
         dims = dict(getattr(module, "DIMENSIONS", {}))
         notes = list(getattr(module, "NOTES", []))
-        problems = validate(mesh, regions, envelope)
+        problems = validate(mesh, regions, envelope, script_src=script.read_text())
         result["problems"] = problems
         result.update(write_triple(mesh, out_dir, name, dims, notes, regions, params))
         result["ok"] = not problems

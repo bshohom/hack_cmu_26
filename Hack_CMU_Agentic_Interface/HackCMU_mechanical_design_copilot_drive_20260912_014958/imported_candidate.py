@@ -490,10 +490,50 @@ def _shelf_checks(
     ]
 
 
+def _generated_checks(
+    requirements: UserRequirements, candidate: ImportedCandidateGeometry
+) -> List[CandidateFitCheck]:
+    """Grok/runner already validated watertight + envelope. No cup-holder bottle/desk checks."""
+    prot = requirements.design_envelope.max_protrusion_mm
+    hi_x = candidate.bbox_max_mm[0] if candidate.bbox_max_mm else None
+    if prot is not None and hi_x is not None:
+        envelope = _leq_check(
+            "envelope_fit",
+            prot,
+            hi_x,
+            invert=True,
+            pass_msg="Generated part is within the allowed reach.",
+            fail_msg="Generated part exceeds the allowed reach.",
+            unknown_msg="Envelope could not be compared.",
+        )
+    else:
+        envelope = CandidateFitCheck(
+            name="envelope_fit",
+            status=CandidateFitStatus.PASS,
+            required_mm=prot,
+            available_mm=hi_x,
+            message="Envelope already enforced by the warm-start validator.",
+        )
+    if candidate.watertight is False:
+        body = CandidateFitCheck(
+            name="connected_body",
+            status=CandidateFitStatus.FAIL,
+            message="Generated mesh is not a watertight body.",
+        )
+    else:
+        body = CandidateFitCheck(
+            name="connected_body",
+            status=CandidateFitStatus.PASS,
+            message="Generated mesh is accepted as one body.",
+        )
+    return [envelope, body]
+
+
 _FIT_FAMILIES = {
     "cupholder": _cupholder_checks,
     "desk_bag_hook": _hook_checks,
     "stapler_shelf": _shelf_checks,
+    "generated": _generated_checks,
 }
 
 
@@ -502,7 +542,9 @@ def fit_family_for(candidate: ImportedCandidateGeometry) -> str:
     task = (candidate.task or candidate.candidate_name or "").strip().lower()
     if task in _FIT_FAMILIES:
         return task
-    return "cupholder"
+    if task.startswith("generated") or task.startswith("grok"):
+        return "generated"
+    return "generated"
 
 
 def check_candidate_fit(
@@ -598,6 +640,13 @@ _FIT_QUESTIONS: Dict[str, Dict[str, Tuple[str, str, str]]] = {
             "is unknown. Give the maximum protrusion in mm.",
         ),
     },
+    "generated": {
+        "envelope_fit": (
+            "max_protrusion_mm",
+            "Generated part exceeds the allowed reach. Revise the reach limit or try again.",
+            "Envelope fit could not be checked. Give the maximum reach in mm.",
+        ),
+    },
 }
 
 
@@ -616,10 +665,11 @@ def candidate_fit_questions(result: CandidateFitResult, family: str = "cupholder
             questions.append(ClarificationQuestion(field=field, question=unknown_q, priority="high"))
 
     if not questions:
+        fallback_field = "max_protrusion_mm" if family == "generated" else "bottle_diameter_mm"
         questions.append(
             ClarificationQuestion(
-                field="bottle_diameter_mm",
-                question="Revise the requirements so they fit the imported candidate geometry.",
+                field=fallback_field,
+                question="Revise the requirements so they fit the candidate geometry.",
                 priority="high",
             )
         )

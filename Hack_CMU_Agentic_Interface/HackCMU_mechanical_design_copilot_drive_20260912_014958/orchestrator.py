@@ -17,7 +17,7 @@ from typing import List, Optional, Set, Tuple
 from agents.design_review import review_design
 from agents.feasibility import check_design_feasibility, feasibility_questions
 from agents.geometry import GeometryAgent
-from agents.interaction import InteractionAgent
+from agents.interaction import InteractionAgent, missing_requirement_fields
 from agents.structure import StructureAgent
 from reasoning import run_reasoning_agent
 from imported_candidate import candidate_fit_questions, check_candidate_fit, fit_family_for
@@ -206,6 +206,38 @@ class Orchestrator:
                 return self.state
         return self.state
 
+    def retry_topology(self) -> DesignState:
+        """Rebuild/retry topology from the existing validated candidate.
+
+        Does not clear geometry, regions, or the warm-start path. Does not call
+        the warm-start generator when a candidate is already attached.
+        """
+        print("[RUN] RETRY_OPTIMIZATION", flush=True)
+        if self.imported_candidate is None:
+            existing = getattr(self.state, "imported_candidate", None)
+            if existing is not None:
+                self.imported_candidate = existing
+        if self.imported_candidate is not None:
+            self.state.imported_candidate = self.imported_candidate
+            path = getattr(self.imported_candidate, "mesh_path", "") or ""
+            print(f"[RUN] reusing warm start path = {path}", flush=True)
+        self.state.topology = None
+        self.state.notes = ""
+        self.state.contract_error = None
+        if (
+            self.state.geometry is not None
+            and self.state.structure is not None
+            and self.state.analysis is not None
+        ):
+            self.state.stage = WorkflowStage.TOPOLOGY_OPTIMIZATION
+        elif self.state.geometry is None:
+            self.state.stage = WorkflowStage.GEOMETRY
+        elif self.state.structure is None:
+            self.state.stage = WorkflowStage.STRUCTURE
+        else:
+            self.state.stage = WorkflowStage.ANALYSIS
+        return self.run()
+
     def _apply_interaction(self, result) -> None:
         self.state.requirements = result.requirements
         self.state.interaction_decision = result.decision
@@ -285,7 +317,8 @@ class Orchestrator:
             f"desk={getattr(getattr(req, 'environment', None), 'desk_thickness_mm', None)} "
             f"method={getattr(getattr(req, 'attachment', None), 'method', None)!r} "
             f"region={getattr(getattr(req, 'attachment', None), 'allowed_contact_region', None)!r} "
-            f"reach={getattr(getattr(req, 'design_envelope', None), 'max_protrusion_mm', None)} "
+            f"reach={((getattr(req, 'task_answers', None) or {}).get('required_reach_mm'))} "
+            f"protrusion={getattr(getattr(req, 'design_envelope', None), 'max_protrusion_mm', None)} "
             f"mfg={getattr(getattr(req, 'manufacturing', None), 'method', None)!r} "
             f"answers={getattr(req, 'task_answers', None)}",
             flush=True,
@@ -355,10 +388,16 @@ class Orchestrator:
                 self.imported_candidate = generated
                 self._emit("WARM_START_PRESENT", "generated this run")
             else:
+                self.warm_start_error = (
+                    self.warm_start_error
+                    or "Warm-start generation returned no validated mesh"
+                )
                 self.state.notes = (
-                    "Warm-start generation failed; continuing without a candidate mesh "
-                    f"(topology optimization will be mocked). {self.warm_start_error or ''}"
+                    "Warm-start generation failed. "
+                    f"{self.warm_start_error}"
                 ).strip()
+                print("[RUN] failure stage = warm_start_generation_failed", flush=True)
+                return
         if self.imported_candidate is not None:
             self.state.stage = WorkflowStage.CANDIDATE_FIT
             return
@@ -398,6 +437,9 @@ class Orchestrator:
         self.state.topology = None
 
     def _handle_feasibility(self) -> None:
+        if self.warm_start_generator is not None and self.imported_candidate is None:
+            print("[RUN] failure stage = warm_start_generation_failed", flush=True)
+            return
         if self.state.geometry is None or self.state.requirements is None:
             self._request_info("Feasibility check needs geometry and requirements.")
             return
@@ -526,6 +568,10 @@ class Orchestrator:
         self.state.stage = WorkflowStage.STRUCTURE
 
     def _handle_topology(self) -> None:
+        if self.warm_start_generator is not None and self.imported_candidate is None:
+            self._emit("BLOCKED: topology needs a validated warm-start mesh")
+            print("[RUN] failure stage = warm_start_generation_failed", flush=True)
+            return
         if self.state.analysis is None:
             self._emit("BLOCKED: TOPOLOGY_OPTIMIZATION requires AnalysisOutput")
             self._block_contract(
@@ -758,7 +804,7 @@ class Orchestrator:
         req = self.state.requirements
         if req is None:
             return ["requirements"]
-        return [spec["field"] for spec in self.interaction._missing(req)]
+        return missing_requirement_fields(req)
 
     def _requirements_ready(self) -> bool:
         return not self._requirements_gaps()

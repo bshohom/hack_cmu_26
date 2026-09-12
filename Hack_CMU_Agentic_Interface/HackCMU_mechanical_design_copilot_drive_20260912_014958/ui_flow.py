@@ -86,24 +86,18 @@ def _update_from_answers(answers: Optional[Dict[str, Any]]):
 
 
 def backend_missing_fields(state: DesignState, answers: Optional[Dict[str, Any]] = None) -> List[str]:
-    """Same missing-field list GeometryAgent gating uses: InteractionAgent._missing.
-
-    Pending widget answers are preview-applied onto a copy of the contract so the
-    UI cannot say Ready unless apply_answers would advance to geometry.
-    """
+    """UI-facing name for missing_requirement_fields(). No local field checklist."""
     answers = answers or {}
     req = getattr(state, "requirements", None)
     from schemas import UserRequirements
+    from agents.interaction import InteractionAgent, missing_requirement_fields
 
     if isinstance(req, UserRequirements):
-        from agents.interaction import InteractionAgent
-
-        agent = InteractionAgent()
         preview = req.model_copy(deep=True)
         update = _update_from_answers(answers)
         if update is not None:
-            agent.apply_update(preview, update)
-        return [spec["field"] for spec in agent._missing(preview)]
+            InteractionAgent().apply_update(preview, update)
+        return missing_requirement_fields(preview)
 
     fields = clarification_fields(state)
     if fields:

@@ -9,6 +9,7 @@ from agents.interaction import (
     TASK_BED_HANDLE,
     TASK_CUPHOLDER,
     TASK_DESK_HOOK,
+    TASK_GENERIC,
     TASK_WALL_SHELF,
     classify_design_task,
     classify_hazard,
@@ -30,6 +31,10 @@ class TaskClarificationTests(unittest.TestCase):
         self.assertEqual(
             classify_design_task("Design a wall-mounted shelf for a router"),
             TASK_WALL_SHELF,
+        )
+        self.assertEqual(
+            classify_design_task("Design a phone stand for my nightstand"),
+            TASK_GENERIC,
         )
 
     def test_bed_handle_is_not_auto_rejected(self) -> None:
@@ -117,7 +122,7 @@ class TaskClarificationTests(unittest.TestCase):
         req = orch.state.requirements
         self.assertEqual(orch.state.stage, WorkflowStage.GEOMETRY)
         self.assertEqual(req.payload.filled_mass_kg, 80.0)
-        self.assertEqual(req.design_envelope.max_protrusion_mm, 50.0)
+        self.assertIsNone(req.design_envelope.max_protrusion_mm)
         self.assertEqual(req.attachment.method, "adhesive")
         self.assertEqual(req.attachment.allowed_contact_region, "wall")
         self.assertEqual(req.manufacturing.method, "3d_print")
@@ -125,9 +130,36 @@ class TaskClarificationTests(unittest.TestCase):
         self.assertIsNone(req.environment.desk_thickness_mm)
         self.assertEqual(orch._requirements_gaps(), [])
         orch._handle_geometry()
+        self.assertEqual(orch.state.stage, WorkflowStage.GEOMETRY)
         self.assertNotEqual(orch.state.stage, WorkflowStage.REQUEST_INFORMATION)
         self.assertIsNotNone(orch.state.geometry)
+        self.assertIsNone(orch.state.topology)
+        self.assertTrue(orch.warm_start_error)
         self.assertEqual(grok_called["n"], 1)
+        self.assertEqual(req.task_answers.get("required_reach_mm"), 50.0)
+
+    def test_required_reach_and_max_protrusion_stay_separate(self) -> None:
+        orch = Orchestrator()
+        orch.ingest_user_request("Design a handle to help a person get up from bed")
+        orch.apply_answers(
+            RequirementsUpdate(
+                supported_load_kg=80.0,
+                attachment_structure="wall",
+                handle_location="bedside",
+                mounting_region="wall",
+                drilling_allowed=False,
+                required_reach_mm=50.0,
+                max_protrusion_mm=150.0,
+                manufacturing_method="3d_print",
+                attachment_method="adhesive",
+            )
+        )
+        req = orch.state.requirements
+        assert req is not None
+        self.assertEqual(req.task_answers.get("required_reach_mm"), 50.0)
+        self.assertEqual(req.design_envelope.max_protrusion_mm, 150.0)
+        self.assertEqual(orch.interaction._field_value(req, "required_reach_mm"), 50.0)
+        self.assertEqual(orch.interaction._field_value(req, "max_protrusion_mm"), 150.0)
 
     def test_listed_bed_handle_answers_leave_handle_and_drilling_if_unset(self) -> None:
         orch = Orchestrator()
@@ -145,7 +177,7 @@ class TaskClarificationTests(unittest.TestCase):
         req = orch.state.requirements
         assert req is not None
         self.assertEqual(req.payload.filled_mass_kg, 80.0)
-        self.assertEqual(req.design_envelope.max_protrusion_mm, 50.0)
+        self.assertIsNone(req.design_envelope.max_protrusion_mm)
         self.assertEqual(req.attachment.method, "adhesive")
         self.assertEqual(req.attachment.allowed_contact_region, "wall")
         self.assertEqual(req.manufacturing.method, "3d_print")
@@ -162,6 +194,16 @@ class TaskClarificationTests(unittest.TestCase):
             "mounting_region": "wall",
         })
         self.assertNotEqual(spec.title, "Ready to optimize")
+
+    def test_unknown_task_asks_generic_engineering_not_cupholder(self) -> None:
+        fields = {spec["field"] for spec in clarification_specs_for_task(TASK_GENERIC)}
+        self.assertIn("supported_load_kg", fields)
+        self.assertIn("attachment_method", fields)
+        self.assertIn("required_reach_mm", fields)
+        self.assertIn("max_protrusion_mm", fields)
+        self.assertNotIn("bottle_diameter_mm", fields)
+        self.assertNotIn("desk_thickness_mm", fields)
+        self.assertNotIn("filled_bottle_mass_kg", fields)
 
     def test_empty_clarifications_do_not_look_ready_when_backend_gaps_exist(self) -> None:
         orch = Orchestrator()

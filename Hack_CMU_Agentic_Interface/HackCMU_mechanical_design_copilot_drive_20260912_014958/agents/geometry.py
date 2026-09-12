@@ -18,11 +18,14 @@ from schemas import (
 
 PLA_DENSITY_KG_MM3 = 1.24e-6
 
-# Per payload kind: (part shape, load region name, how the payload bears on the part).
+# Per payload kind: (part shape, load-region role name, how the load bears).
+# Role names are metadata. Numerical integration must key on role, not these strings.
 PAYLOAD_KINDS = {
     "cylinder": ("clamp_arm_ring", "cup_cavity", "payload weight in the cup ring/base"),
     "strap": ("clamp_arm_hook", "strap_seat", "strap weight distributed over the hook arm contact patch"),
     "box": ("clamp_shelf", "platform", "payload weight distributed over the flat platform"),
+    "handle": ("mount_functional", "grip", "user pull on the grip"),
+    "object": ("mount_functional", "functional_region", "user load on the functional region"),
 }
 
 
@@ -36,7 +39,7 @@ class GeometryAgent:
 
     def run(self, inp: GeometryInput) -> GeometryOutput:
         req = inp.requirements
-        kind = req.object_geometry.kind if req.object_geometry.kind in PAYLOAD_KINDS else "cylinder"
+        kind = req.object_geometry.kind if req.object_geometry.kind in PAYLOAD_KINDS else "object"
         shape, load_name, load_note = PAYLOAD_KINDS[kind]
         size = req.object_geometry.bottle_diameter_mm or 0.0
         height = req.object_geometry.bottle_height_mm or 250.0
@@ -45,7 +48,7 @@ class GeometryAgent:
         contact = req.attachment.allowed_contact_region or "unspecified"
 
         environment = EnvironmentGeometry(
-            kind="desk_plane",
+            kind=req.environment.kind or "desk_plane",
             desk_thickness_mm=desk_t,
             surface_normal=req.environment.surface_normal,
         )
@@ -68,6 +71,11 @@ class GeometryAgent:
             load_z = desk_t + max(40.0, height)
             part_height = load_z + 10.0
             part_width = max(size * 1.4, 60.0)
+        elif kind == "handle":
+            load_x = max((protrusion or 80.0) * 0.7, 30.0)
+            load_z = 80.0
+            part_height = 160.0
+            part_width = 40.0
         else:
             load_x = protrusion * 0.85
             load_z = desk_t + 10.0

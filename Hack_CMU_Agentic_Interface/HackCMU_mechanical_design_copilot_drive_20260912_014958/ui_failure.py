@@ -23,6 +23,20 @@ _PROTRUSION_RE_FLIP = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _BODIES_RE = re.compile(r"(?P<n>\d+)\s+disconnected\s+bod", re.IGNORECASE)
+_STALE_FEASIBILITY = (
+    "design requirements infeasible",
+    "payload diameter must be positive",
+    "desk thickness must be positive",
+)
+
+
+def _notes_for_warm_start(notes: str) -> str:
+    """Drop leftover feasibility text from a previous run."""
+    blob = notes or ""
+    lowered = blob.lower()
+    if any(token in lowered for token in _STALE_FEASIBILITY):
+        return ""
+    return blob
 
 
 @dataclass(frozen=True)
@@ -130,6 +144,23 @@ def parse_failure_findings(text: str) -> List[FailureFinding]:
                 "The design exceeded the allowed size.",
                 "Retry with the current limit, or increase the size limit.",
                 field="max_protrusion_mm",
+            )
+        )
+
+    if (
+        "has no attribute" in lowered
+        or "unsupported api" in lowered
+        or "remove_duplicate_faces" in lowered
+    ):
+        method = "that mesh function"
+        attr = re.search(r"has no attribute '([^']+)'", blob)
+        if attr:
+            method = attr.group(1)
+        _add(
+            FailureFinding(
+                "unsupported_api",
+                f"The generated script used {method}, which this environment does not support.",
+                "Try generating the starting design again.",
             )
         )
 
@@ -241,7 +272,7 @@ def build_failure_card(
             headline="The optimization ran but did not settle on a stable design.",
             findings=findings,
             primary_label="Retry optimization",
-            secondary_label="Change constraints",
+            secondary_label="Regenerate design",
             raw_log=raw_log,
         )
     if stage == STAGE_OPTIMIZATION:
@@ -253,10 +284,11 @@ def build_failure_card(
                 FailureFinding(
                     "optimization",
                     "No optimized part was produced.",
-                    "Retry optimization or revise the design constraints.",
+                    "Retry optimization or regenerate the starting design.",
                 )
             ],
             primary_label="Retry optimization",
+            secondary_label="Regenerate design",
             raw_log=raw_log,
         )
     if stage == STAGE_VERIFICATION:
@@ -280,9 +312,10 @@ def build_failure_card(
     secondary = "Change size limit" if constraint == "max_protrusion_mm" else (
         "Change constraints" if constraint else None
     )
+    api_only = findings and all(item.kind == "unsupported_api" for item in findings)
     return FailureCard(
         stage=stage,
-        headline="Generation failed validation",
+        headline="Starting design needs revision",
         findings=findings
         or [
             FailureFinding(
@@ -292,9 +325,9 @@ def build_failure_card(
             )
         ],
         primary_label="Try again",
-        secondary_label=secondary,
+        secondary_label=None if api_only else secondary,
         raw_log=raw_log,
-        constraint_field=constraint,
+        constraint_field=None if api_only else constraint,
     )
 
 
@@ -324,13 +357,13 @@ def detect_ui_failure(
         return build_failure_card(
             stage=STAGE_WARM_START,
             warm_start=warm_start,
-            notes=notes,
+            notes=_notes_for_warm_start(notes),
             warm_start_error=warm_start_error,
         )
     if warm_start_error or "warm-start generation failed" in notes.lower():
         return build_failure_card(
             stage=STAGE_WARM_START,
-            notes=notes,
+            notes=_notes_for_warm_start(notes),
             warm_start_error=warm_start_error,
         )
     if stage_value == "topology_failed":

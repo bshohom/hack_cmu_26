@@ -158,7 +158,7 @@ class UnknownFitTests(unittest.TestCase):
     def _candidate(self, **over):
         from schemas import ImportedCandidateGeometry
 
-        data = {"mesh_path": "/tmp/x.stl", "candidate_name": "generated", "task": "generated"}
+        data = {"mesh_path": "/tmp/x.stl", "candidate_name": "cupholder", "task": "cupholder"}
         data.update(over)
         return ImportedCandidateGeometry(**data)
 
@@ -177,6 +177,28 @@ class UnknownFitTests(unittest.TestCase):
         self.assertEqual(
             fields, {"bottle_diameter_mm", "desk_thickness_mm", "max_protrusion_mm"}
         )
+
+    def test_generated_warm_start_does_not_require_bottle_or_desk(self) -> None:
+        from imported_candidate import candidate_fit_questions
+        from schemas import ImportedCandidateGeometry
+
+        req = UserRequirements()
+        req.task_kind = "bed_handle"
+        req.design_envelope.max_protrusion_mm = 50.0
+        candidate = ImportedCandidateGeometry(
+            mesh_path="/tmp/x.stl",
+            candidate_name="grok_warmstart",
+            task="generated",
+            watertight=True,
+            bbox_min_mm=(0.0, -10.0, 0.0),
+            bbox_max_mm=(40.0, 10.0, 30.0),
+        )
+        self.assertEqual(fit_family_for(candidate), "generated")
+        result = check_candidate_fit(req, candidate)
+        self.assertTrue(result.fits, result.message)
+        fields = {q.field for q in candidate_fit_questions(result, family="generated")}
+        self.assertNotIn("bottle_diameter_mm", fields)
+        self.assertNotIn("desk_thickness_mm", fields)
 
     def test_fully_checked_candidate_still_passes(self) -> None:
         req = UserRequirements()

@@ -51,7 +51,7 @@ class FailureParseTests(unittest.TestCase):
         self.assertIn("mesh is not watertight", card.raw_log)
         self.assertIn("7 disconnected bodies", card.raw_log)
         self.assertIn("max_protrusion_mm=200", card.raw_log)
-        self.assertEqual(card.headline, "Generation failed validation")
+        self.assertEqual(card.headline, "Starting design needs revision")
         self.assertEqual(card.primary_label, "Try again")
         self.assertEqual(card.secondary_label, "Change size limit")
         self.assertEqual(card.log_label, "View full log")
@@ -64,6 +64,7 @@ class FailureParseTests(unittest.TestCase):
         self.assertIn("SAM failed", recon.raw_log)
         conv = build_failure_card(stage=STAGE_NONCONVERGED, notes="did not converge")
         self.assertEqual(conv.primary_label, "Retry optimization")
+        self.assertEqual(conv.secondary_label, "Regenerate design")
         self.assertIn("stable design", conv.headline.lower())
 
 
@@ -94,6 +95,31 @@ class FailureDetectTests(unittest.TestCase):
         self.assertNotIn("ready to optimize", spec.title.lower())
         self.assertNotEqual(spec.kind, "optimize")
         self.assertEqual(spec.kind, "retry")
+
+    def test_stale_feasibility_notes_are_not_in_warm_start_log(self) -> None:
+        state = SimpleNamespace(
+            stage=WorkflowStage.GEOMETRY,
+            notes=(
+                "DESIGN REQUIREMENTS INFEASIBLE. "
+                "Payload diameter must be positive and physically nonzero (got 0.0 mm). "
+                "Desk thickness must be positive and physically nonzero (got 0.0 mm)."
+            ),
+            topology=None,
+        )
+        card = detect_ui_failure(
+            state,
+            warm_start={
+                "ok": False,
+                "attempts": 3,
+                "error": "",
+                "problems": ["mesh is not watertight", "mesh has 8 disconnected bodies"],
+            },
+        )
+        self.assertEqual(card.stage, STAGE_WARM_START)
+        self.assertIn("disconnected", card.raw_log.lower())
+        self.assertNotIn("Payload diameter", card.raw_log)
+        self.assertNotIn("Desk thickness", card.raw_log)
+        self.assertNotIn("INFEASIBLE", card.raw_log)
 
     def test_detects_reconstruction_and_nonconvergence(self) -> None:
         recon = detect_ui_failure(
@@ -148,7 +174,7 @@ class FailureAppTests(unittest.TestCase):
         self.assertNotIn("disconnected bodies", page)
         self.assertNotIn("max_protrusion_mm", page)
         self.assertNotIn("Ready to optimize", page)
-        self.assertIn("Generation failed validation", page)
+        self.assertIn("Starting design needs revision", page)
         self.assertIn("7 mm", page)
         self.assertIn("200", page)
         self.assertIn("207", page)

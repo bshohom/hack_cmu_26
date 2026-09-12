@@ -128,10 +128,20 @@ class PendingPrefillTests(unittest.TestCase):
     def test_trusted_registration_prefills_empty_thickness(self) -> None:
         store = {
             "answers": {},
+            "request_text": "I want a cup holder attached to this desk",
             "registration_meas": {"prefill": True, "desk_thickness_mm": 17.32},
         }
         apply_trusted_registration_answers(store)
         self.assertEqual(store["answers"]["desk_thickness_mm"], 17.32)
+
+    def test_trusted_registration_does_not_prefill_desk_for_non_desk_task(self) -> None:
+        store = {
+            "answers": {},
+            "request_text": "Design a handle to help a person get up from bed",
+            "registration_meas": {"prefill": True, "desk_thickness_mm": 17.32},
+        }
+        apply_trusted_registration_answers(store)
+        self.assertNotIn("desk_thickness_mm", store["answers"])
 
     def test_pending_workspace_tab_moves_before_widget_construction(self) -> None:
         store = {

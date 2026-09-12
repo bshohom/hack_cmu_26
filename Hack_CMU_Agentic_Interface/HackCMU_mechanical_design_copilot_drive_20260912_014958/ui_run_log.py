@@ -68,15 +68,29 @@ def requirements_fingerprint(requirements: Any) -> str:
     envelope = getattr(requirements, "design_envelope", None)
     attach = getattr(requirements, "attachment", None)
     mfg = getattr(requirements, "manufacturing", None)
+    extras = getattr(requirements, "task_answers", None) or {}
+    extra_keys = (
+        "required_reach_mm",
+        "supported_load_kg",
+        "attachment_structure",
+        "handle_location",
+        "mounting_region",
+        "drilling_allowed",
+        "payload_size_mm",
+        "wall_clearance_mm",
+    )
     parts = [
+        getattr(requirements, "task_kind", ""),
         getattr(requirements, "user_message", ""),
         getattr(payload, "filled_mass_kg", None),
+        getattr(geom, "kind", None),
         getattr(geom, "bottle_diameter_mm", None),
         getattr(env, "desk_thickness_mm", None),
         getattr(envelope, "max_protrusion_mm", None),
         getattr(attach, "method", None),
         getattr(attach, "allowed_contact_region", None),
         getattr(mfg, "method", None),
+        *[extras.get(key) for key in extra_keys],
     ]
     return "|".join("" if item is None else str(item) for item in parts)
 

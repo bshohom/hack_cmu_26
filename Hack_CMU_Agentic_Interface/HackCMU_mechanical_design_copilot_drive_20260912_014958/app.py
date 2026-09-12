@@ -91,6 +91,13 @@ from ui_inspect import (
     pipeline_status,
 )
 from ui_failure import STAGE_RECONSTRUCTION, detect_ui_failure
+from ui_retry import (
+    REGENERATE_DESIGN,
+    RETRY_TOPOLOGY,
+    progress_caption,
+    retry_action,
+)
+from ui_run_log import requirements_fingerprint, should_reuse_warm_start
 from ui_flow import (
     ActionSpec,
     WORKSPACE_TAB_OPTIMIZATION,
@@ -223,7 +230,7 @@ BADGE_COLORS = {
 
 ACTION_ANCHOR_ID = "mdc-current-action"
 API_NOT_CONNECTED = "API not connected"
-GENERATION_FAILED_VALIDATION = "Generation failed validation"
+GENERATION_FAILED_VALIDATION = "Starting design needs revision"
 BRAND_TITLE = "On TOP of the World"
 BRAND_TAGLINE = "Snap it. TOPtimize it. Print it."
 BRAND_SUB = (
@@ -426,14 +433,37 @@ def _warm_start_generator():
         return None
 
     def _generate(requirements):
+        force = bool(st.session_state.get("force_regenerate_design"))
         reused = _session_warm_start_candidate()
-        if reused is not None:
+        current_fp = requirements_fingerprint(requirements)
+        stored_fp = st.session_state.get("warm_start_fingerprint") or ""
+        if should_reuse_warm_start(
+            warm_start_ok=_warm_start_is_valid(reused),
+            has_candidate=reused is not None,
+            fingerprint=stored_fp,
+            current_fingerprint=current_fp,
+            force_regen=force,
+        ):
             _run_print("[GROK] GENERATION skipped — valid warm-start mesh already exists")
             _run_print(f"[RUN] warm start path = {_warm_start_mesh_path(reused)}")
             return reused
+        st.session_state.force_regenerate_design = False
         _run_print("[GROK] GENERATION_STARTED")
+        st.session_state.warm_start_result = None
+        st.session_state.failure_log_card = None
+        orch = st.session_state.get("orch")
+        if orch is not None:
+            orch.warm_start_error = None
+            if getattr(orch, "state", None) is not None:
+                orch.state.notes = ""
+                orch.state.feasibility = None
         try:
-            result = generate_warm_start(requirements, provider, name="grok_warmstart")
+            result = generate_warm_start(
+                requirements,
+                provider,
+                name="grok_warmstart",
+                log=lambda msg: _run_print(f"[GROK] {msg}"),
+            )
         except Exception:
             _run_print("[GROK] GENERATION_FAILED")
             _run_print("[RUN] EXCEPTION at GROK_GENERATION")
@@ -453,6 +483,7 @@ def _warm_start_generator():
             _run_print("[GROK] GENERATION_FAILED")
             raise RuntimeError(result.error or "; ".join(result.problems) or "generation failed")
         st.session_state.warm_start_candidate = result.candidate
+        st.session_state.warm_start_fingerprint = requirements_fingerprint(requirements)
         _run_print("[GROK] GENERATION_FINISHED")
         _run_print(f"[RUN] warm start path = {getattr(result.candidate, 'mesh_path', '')}")
         return result.candidate
@@ -648,6 +679,16 @@ def apply_trusted_registration_answers(store: Dict[str, Any]) -> None:
     meas = store.get("registration_meas") or {}
     if not meas.get("prefill") or meas.get("desk_thickness_mm") is None:
         return
+    from agents.interaction import classify_design_task, clarification_specs_for_task
+
+    orch = store.get("orch")
+    req = getattr(getattr(orch, "state", None), "requirements", None)
+    task = getattr(req, "task_kind", None) or classify_design_task(
+        store.get("submitted_request") or store.get("request_text") or ""
+    )
+    asked = {spec["field"] for spec in clarification_specs_for_task(task)}
+    if "desk_thickness_mm" not in asked:
+        return
     answers = store.setdefault("answers", {})
     if answers.get("desk_thickness_mm") in (None, "", 0, 0.0):
         answers["desk_thickness_mm"] = float(meas["desk_thickness_mm"])
@@ -754,6 +795,12 @@ def _init_session() -> None:
         st.session_state.warm_start_result = None
     if "warm_start_candidate" not in st.session_state:
         st.session_state.warm_start_candidate = None
+    if "warm_start_fingerprint" not in st.session_state:
+        st.session_state.warm_start_fingerprint = None
+    if "force_regenerate_design" not in st.session_state:
+        st.session_state.force_regenerate_design = False
+    if "progress_kind" not in st.session_state:
+        st.session_state.progress_kind = None
 
 
 def _apply_pending_prefills() -> None:
@@ -792,6 +839,9 @@ def _reset(
     st.session_state.last_chat_error_key = None
     st.session_state.warm_start_result = None
     st.session_state.warm_start_candidate = None
+    st.session_state.warm_start_fingerprint = None
+    st.session_state.force_regenerate_design = False
+    st.session_state.progress_kind = None
     st.session_state.focus_constraint_field = None
     _clear_answer_widgets()
     if request_prefill is not None:
@@ -906,7 +956,7 @@ def _preserve_supplied_answers(state: DesignState) -> None:
         "mounting_region": extras.get("mounting_region") or req.attachment.allowed_contact_region,
         "drilling_allowed": extras.get("drilling_allowed"),
         "max_protrusion_mm": req.design_envelope.max_protrusion_mm,
-        "required_reach_mm": extras.get("required_reach_mm") or req.design_envelope.max_protrusion_mm,
+        "required_reach_mm": extras.get("required_reach_mm"),
         "manufacturing_method": req.manufacturing.method,
         "wall_clearance_mm": extras.get("wall_clearance_mm") or req.design_envelope.max_width_mm,
     }
@@ -1059,15 +1109,67 @@ def _on_primary_action() -> None:
 
 
 def _retry_same_constraints() -> None:
-    """Rerun generation/optimization with the same answers. Does not change constraints."""
+    """Dispatch Retry optimization vs regenerate from the current failure stage."""
+    sync_answer_widgets(st.session_state)
+    failure = _current_failure()
+    orch = st.session_state.get("orch")
+    req = getattr(getattr(orch, "state", None), "requirements", None)
+    stored_fp = st.session_state.get("warm_start_fingerprint") or ""
+    current_fp = requirements_fingerprint(req)
+    action = retry_action(
+        failure_stage=getattr(failure, "stage", "") or "",
+        has_valid_warm_start=_session_warm_start_candidate() is not None,
+        requirements_changed=bool(stored_fp and current_fp and stored_fp != current_fp),
+        force_regenerate=False,
+    )
+    if action == RETRY_TOPOLOGY:
+        _retry_topology_only()
+    else:
+        _regenerate_design()
+
+
+def _retry_topology_only() -> None:
+    """Reuse the validated warm-start and rebuild topology only."""
+    _run_print("[RUN] RETRY_OPTIMIZATION")
+    sync_answer_widgets(st.session_state)
+    orch: Orchestrator = st.session_state.orch
+    reused = _session_warm_start_candidate()
+    if reused is not None:
+        orch.imported_candidate = reused
+        if getattr(orch, "state", None) is not None:
+            orch.state.imported_candidate = reused
+    path = _warm_start_mesh_path(reused)
+    _run_print(f"[RUN] reusing warm start path = {path}")
+    mark_ui_transition(st.session_state)
+    st.session_state.progress_kind = RETRY_TOPOLOGY
+    if _topology_live() or orch.warm_start_generator is not None:
+        _run_with_progress(orch, progress_kind=RETRY_TOPOLOGY, runner=orch.retry_topology)
+    else:
+        orch.retry_topology()
+    _append("assistant", _user_result_message(orch.state))
+    if orch.state.topology is not None or orch.state.geometry is not None or orch.state.structure is not None:
+        _queue_workspace_tab(
+            workspace_tab_after_event(
+                design=orch.state.geometry is not None or orch.state.structure is not None,
+                topology=orch.state.topology is not None,
+            )
+        )
+
+
+def _regenerate_design() -> None:
+    """Clear the candidate and call the geometry generator again."""
+    _run_print("[RUN] REGENERATE_DESIGN")
     sync_answer_widgets(st.session_state)
     answers = dict(st.session_state.get("answers") or {})
     message = st.session_state.get("submitted_request") or _current_request_text()
+    st.session_state.force_regenerate_design = True
     st.session_state.warm_start_result = None
     st.session_state.warm_start_candidate = None
+    st.session_state.warm_start_fingerprint = None
     st.session_state.orch = _new_orchestrator()
     st.session_state.answers = answers
     mark_ui_transition(st.session_state)
+    st.session_state.progress_kind = REGENERATE_DESIGN
     _sync_orch_fixtures()
     if not message:
         st.session_state.ui_notice = "Write a design request first."
@@ -1083,7 +1185,7 @@ def _retry_same_constraints() -> None:
         WorkflowStage.DESIGN_REVIEW_FAILED,
     ):
         if _topology_live() or orch.warm_start_generator is not None:
-            _run_with_progress(orch)
+            _run_with_progress(orch, progress_kind=REGENERATE_DESIGN)
         else:
             orch.run()
     _append("assistant", _user_result_message(orch.state))
@@ -1242,7 +1344,15 @@ def _continue_design(*, from_optimize: bool = False) -> None:
                 f"topology={orch.state.topology is not None} "
                 f"geometry={orch.state.geometry is not None}"
             )
-        if orch.state.stage == WorkflowStage.REQUEST_INFORMATION:
+        warm_failed = bool(
+            getattr(orch, "warm_start_error", None)
+            or (st.session_state.get("warm_start_result") or {}).get("ok") is False
+        )
+        if warm_failed:
+            if from_optimize:
+                _run_print("[RUN] failure stage = warm_start_generation_failed")
+            _preserve_supplied_answers(orch.state)
+        elif orch.state.stage == WorkflowStage.REQUEST_INFORMATION:
             _refresh_clarifications_from_backend(orch)
             _preserve_supplied_answers(orch.state)
             missing = backend_missing_fields(orch.state, st.session_state.get("answers"))
@@ -1311,12 +1421,22 @@ def _render_reasoning_traces() -> None:
                     st.code(t.prompt_excerpt, language="text")
 
 
-def _run_with_progress(orch: Orchestrator) -> None:
+def _run_with_progress(orch: Orchestrator, *, progress_kind: str | None = None, runner=None) -> None:
     """Run the live stages with a progress bar and a wall-time expectation."""
     status = st.empty()
     bar = st.progress(0.0)
     started = time.monotonic()
     state = {"total": None}
+    kind = progress_kind or st.session_state.get("progress_kind")
+    if not kind:
+        reused = orch.imported_candidate is not None and _warm_start_is_valid(orch.imported_candidate)
+        if reused:
+            kind = RETRY_TOPOLOGY if st.session_state.get("progress_kind") == RETRY_TOPOLOGY else "optimize"
+        elif orch.warm_start_generator is not None:
+            kind = "generate"
+        else:
+            kind = "optimize"
+    caption = progress_caption(kind)
 
     def on_progress(it: int, total: int, compliance: float) -> None:
         state["total"] = total
@@ -1329,19 +1449,17 @@ def _run_with_progress(orch: Orchestrator) -> None:
         )
 
     orch.topology_progress = on_progress
-    if orch.warm_start_generator is not None:
-        status.caption("Generating the warm-start mesh from your measurements…")
-    else:
-        status.caption("Generating preliminary optimized design…")
+    status.caption(caption)
     try:
-        with st.spinner("Generating preliminary optimized design…"):
-            orch.run()
+        with st.spinner(caption):
+            (runner or orch.run)()
     except Exception:
         _run_print("[RUN] EXCEPTION at _run_with_progress/orch.run")
         traceback.print_exc()
         raise
     finally:
         orch.topology_progress = None
+        st.session_state.progress_kind = None
         bar.empty()
         status.empty()
 
@@ -2192,13 +2310,20 @@ def _render_failure_card(card) -> None:
             )
     if card.secondary_label:
         with cols[1]:
-            field = card.constraint_field or "max_protrusion_mm"
-            st.button(
-                card.secondary_label,
-                use_container_width=True,
-                on_click=_focus_constraint_field,
-                args=(field,),
-            )
+            if card.secondary_label == "Regenerate design":
+                st.button(
+                    card.secondary_label,
+                    use_container_width=True,
+                    on_click=_regenerate_design,
+                )
+            else:
+                field = card.constraint_field or "max_protrusion_mm"
+                st.button(
+                    card.secondary_label,
+                    use_container_width=True,
+                    on_click=_focus_constraint_field,
+                    args=(field,),
+                )
     with cols[-1]:
         if st.button(card.log_label, use_container_width=True):
             _failure_log_dialog()

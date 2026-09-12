@@ -210,8 +210,6 @@ def classify_design_task(text: str) -> str:
         return TASK_WALL_SHELF
     if any(token in lowered for token in ("cup holder", "cupholder", "bottle", "mug")):
         return TASK_CUPHOLDER
-    if "holder" in lowered and "desk" in lowered:
-        return TASK_CUPHOLDER
     if any(token in lowered for token in ("hook", "bag")):
         return TASK_DESK_HOOK
     if "shelf" in lowered or "stapler" in lowered:
@@ -296,7 +294,8 @@ def clarification_specs_for_task(task: str, payload: str = "payload") -> List[di
         _spec("supported_load_kg", "What load should it support (kg)?", kind="numeric", unit="kg", reason="load_case"),
         _spec("attachment_structure", "What should it attach to?", kind="text", reason="attachment_interface"),
         _spec("attachment_method", "How should it attach?", kind="categorical", options=["clamp", "screws", "adhesive", "other"], reason="mounting_method"),
-        _spec("required_reach_mm", "How far may it extend (mm)?", kind="numeric", unit="mm", reason="design_envelope"),
+        _spec("required_reach_mm", "What functional reach is required (mm)?", kind="numeric", unit="mm", reason="clearance"),
+        _spec("max_protrusion_mm", "What is the maximum allowed overall size (mm)?", kind="numeric", unit="mm", reason="design_envelope", priority="medium"),
         _spec("manufacturing_method", "How will it be made?", kind="categorical", options=["3d_print", "fdm", "sla"], reason="manufacturing_constraint", priority="medium"),
     ]
 
@@ -359,12 +358,8 @@ class InteractionAgent:
                 requirements.object_geometry.bottle_diameter_mm = update.payload_size_mm
         if update.required_reach_mm is not None:
             extras["required_reach_mm"] = update.required_reach_mm
-            if requirements.design_envelope.max_protrusion_mm is None:
-                requirements.design_envelope.max_protrusion_mm = update.required_reach_mm
         if update.wall_clearance_mm is not None:
             extras["wall_clearance_mm"] = update.wall_clearance_mm
-            if requirements.design_envelope.max_width_mm is None:
-                requirements.design_envelope.max_width_mm = update.wall_clearance_mm
         if update.attachment_structure is not None:
             extras["attachment_structure"] = update.attachment_structure
             if requirements.attachment.allowed_contact_region is None:
@@ -413,6 +408,7 @@ class InteractionAgent:
             req.environment.kind = "wall"
         elif task == TASK_BED_HANDLE:
             req.payload.description = "assist_load"
+            req.object_geometry.kind = "handle"
             req.environment.kind = "bed"
         if "1 l" in lowered or "1l" in lowered or "one liter" in lowered:
             req.payload.volume_l = 1.0
@@ -485,8 +481,8 @@ class InteractionAgent:
             "manufacturing_method": req.manufacturing.method,
             "supported_load_kg": req.payload.filled_mass_kg,
             "payload_size_mm": req.object_geometry.bottle_diameter_mm,
-            "required_reach_mm": req.design_envelope.max_protrusion_mm,
-            "wall_clearance_mm": req.design_envelope.max_width_mm,
+            "required_reach_mm": extras.get("required_reach_mm"),
+            "wall_clearance_mm": extras.get("wall_clearance_mm"),
             "attachment_structure": extras.get("attachment_structure"),
             "handle_location": extras.get("handle_location"),
             "mounting_region": extras.get("mounting_region") or req.attachment.allowed_contact_region,
@@ -508,3 +504,8 @@ class InteractionAgent:
             for spec in clarification_specs_for_task(task, payload)
             if not self._field_answered(req, spec["field"])
         ]
+
+
+def missing_requirement_fields(req: UserRequirements) -> List[str]:
+    """Authoritative unreadiness list. Geometry and the UI must use this."""
+    return [spec["field"] for spec in InteractionAgent()._missing(req)]
