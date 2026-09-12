@@ -1,0 +1,8 @@
+examples/surfcap/**/*.jpg filter=lfs diff=lfs merge=lfs -text
+examples/surfcap/**/*.jpeg filter=lfs diff=lfs merge=lfs -text
+examples/surfcap/**/*.png filter=lfs diff=lfs merge=lfs -text
+examples/surfcap/**/*.heic filter=lfs diff=lfs merge=lfs -text
+examples/surfcap/**/*.JPG filter=lfs diff=lfs merge=lfs -text
+examples/surfcap/**/*.JPEG filter=lfs diff=lfs merge=lfs -text
+examples/surfcap/**/*.PNG filter=lfs diff=lfs merge=lfs -text
+examples/surfcap/**/*.HEIC filter=lfs diff=lfs merge=lfs -text

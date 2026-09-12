@@ -9,11 +9,13 @@ from app import (
     HAPPY_PATH_MESSAGE,
     MISSING_INFO_MESSAGE,
     REJECTED_MESSAGE,
+    apply_pending_registration_path,
     apply_pending_request_prefill,
     consume_scroll_to_action,
     field_display_label,
     field_widget_kind,
     mark_ui_transition,
+    sync_answer_widgets,
 )
 
 
@@ -71,6 +73,27 @@ class PendingPrefillTests(unittest.TestCase):
         mark_ui_transition(store)
         self.assertTrue(consume_scroll_to_action(store))
         self.assertFalse(consume_scroll_to_action(store))
+
+    def test_completed_registration_path_moves_before_widget_construction(self) -> None:
+        store = {
+            "reg_target_path": "old.json",
+            "pending_reg_target_path": "/tmp/new/target.json",
+        }
+        apply_pending_registration_path(store)
+        self.assertEqual(store["reg_target_path"], "/tmp/new/target.json")
+        self.assertIsNone(store["pending_reg_target_path"])
+
+    def test_current_widget_values_win_when_continue_is_clicked(self) -> None:
+        store = {
+            "answers": {"desk_thickness_mm": 20.0},
+            "ans_desk_thickness_mm": 17.32,
+            "no_drill": True,
+        }
+        sync_answer_widgets(store)
+        self.assertEqual(store["answers"]["desk_thickness_mm"], 17.32)
+        self.assertEqual(
+            store["answers"]["attachment_notes"], "clamp only, no drilling"
+        )
 
 
 class StreamlitWidgetOwnershipTests(unittest.TestCase):

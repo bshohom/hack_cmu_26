@@ -17,12 +17,18 @@ import pytest
 @pytest.fixture(autouse=True, scope="session")
 def _disable_live_topology():
     previous = os.environ.get("TO_AGENT_MODE")
+    previous_surfcap = os.environ.get("SURFCAP_MODE")
     os.environ["TO_AGENT_MODE"] = "off"
+    os.environ["SURFCAP_MODE"] = "off"
     yield
     if previous is None:
         os.environ.pop("TO_AGENT_MODE", None)
     else:
         os.environ["TO_AGENT_MODE"] = previous
+    if previous_surfcap is None:
+        os.environ.pop("SURFCAP_MODE", None)
+    else:
+        os.environ["SURFCAP_MODE"] = previous_surfcap
 
 
 @pytest.fixture(autouse=True)
