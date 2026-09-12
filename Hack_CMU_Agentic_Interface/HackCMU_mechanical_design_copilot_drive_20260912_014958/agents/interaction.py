@@ -12,7 +12,6 @@ from schemas import (
     ClarificationQuestion,
     InteractionDecision,
     InteractionResult,
-    MissingInformation,
     RequirementsUpdate,
     UserRequirements,
     VisionRequest,
@@ -192,6 +191,115 @@ REQUIRED_FIELDS = [
     ),
 ]
 
+TASK_CUPHOLDER = "cupholder"
+TASK_DESK_HOOK = "desk_hook"
+TASK_DESK_SHELF = "desk_shelf"
+TASK_BED_HANDLE = "bed_handle"
+TASK_WALL_SHELF = "wall_shelf"
+TASK_GENERIC = "generic"
+
+
+def classify_design_task(text: str) -> str:
+    """Choose a requirement pack from the request. Unknown tasks stay generic."""
+    lowered = (text or "").lower()
+    bedish = any(token in lowered for token in ("bed", "mattress", "headboard"))
+    assist = any(token in lowered for token in ("handle", "assist", "get up", "wake", "stand up"))
+    if bedish and assist:
+        return TASK_BED_HANDLE
+    if "shelf" in lowered and any(token in lowered for token in ("wall", "router")):
+        return TASK_WALL_SHELF
+    if any(token in lowered for token in ("cup holder", "cupholder", "bottle", "mug")):
+        return TASK_CUPHOLDER
+    if "holder" in lowered and "desk" in lowered:
+        return TASK_CUPHOLDER
+    if any(token in lowered for token in ("hook", "bag")):
+        return TASK_DESK_HOOK
+    if "shelf" in lowered or "stapler" in lowered:
+        return TASK_DESK_SHELF
+    return TASK_GENERIC
+
+
+def _spec(
+    field: str,
+    question: str,
+    *,
+    kind: str = "text",
+    unit: Optional[str] = None,
+    options: Optional[List[str]] = None,
+    reason: str = "",
+    source: str = "task_reasoning",
+    priority: str = "high",
+) -> dict:
+    return {
+        "field": field,
+        "question": question,
+        "kind": kind,
+        "unit": unit,
+        "options": options,
+        "reason": reason,
+        "source": source,
+        "priority": priority,
+    }
+
+
+def clarification_specs_for_task(task: str, payload: str = "payload") -> List[dict]:
+    """Task-relevant questions only. Demo cup-holder fields are not a global default."""
+    if task == TASK_CUPHOLDER:
+        return [
+            _spec("filled_bottle_mass_kg", f"What is the {payload} mass (kg), filled / fully loaded?", kind="numeric", unit="kg", reason="load_case"),
+            _spec("bottle_diameter_mm", SIZE_QUESTIONS.get("cylinder", "What is the payload diameter (mm)?").format(payload=payload), kind="numeric", unit="mm", reason="functional_geometry"),
+            _spec("desk_thickness_mm", "What is the desk / mounting-surface thickness (mm)?", kind="numeric", unit="mm", reason="attachment_interface"),
+            _spec("attachment_method", "How should it attach (clamp / screws / adhesive)?", kind="categorical", options=["clamp", "screws", "adhesive"], reason="mounting_method"),
+            _spec("allowed_contact_region", "Where on the desk may it mount (e.g. front edge)?", kind="categorical", options=["desk_front_edge", "desk_side_edge", "desk_underside", "desk_top"], reason="attachment_interface"),
+            _spec("max_protrusion_mm", "What is the maximum allowed protrusion from the desk (mm)?", kind="numeric", unit="mm", reason="design_envelope"),
+            _spec("manufacturing_method", "How will it be made (e.g. 3d_print)?", kind="categorical", options=["3d_print", "fdm", "sla"], reason="manufacturing_constraint", priority="medium"),
+        ]
+    if task == TASK_DESK_HOOK:
+        return [
+            _spec("filled_bottle_mass_kg", "What bag / load mass should it support (kg)?", kind="numeric", unit="kg", reason="load_case"),
+            _spec("desk_thickness_mm", "What is the desk thickness (mm)?", kind="numeric", unit="mm", reason="attachment_interface"),
+            _spec("attachment_method", "How should it mount?", kind="categorical", options=["clamp", "screws", "adhesive"], reason="mounting_method"),
+            _spec("allowed_contact_region", "Where on the desk may it mount?", kind="categorical", options=["desk_front_edge", "desk_side_edge", "desk_underside"], reason="attachment_interface"),
+            _spec("max_protrusion_mm", "How far may it stick out from the desk (mm)?", kind="numeric", unit="mm", reason="design_envelope"),
+            _spec("manufacturing_method", "How will it be made?", kind="categorical", options=["3d_print", "fdm", "sla"], reason="manufacturing_constraint", priority="medium"),
+        ]
+    if task == TASK_DESK_SHELF:
+        return [
+            _spec("filled_bottle_mass_kg", "What load should the shelf support (kg)?", kind="numeric", unit="kg", reason="load_case"),
+            _spec("payload_size_mm", "What is the object footprint width (mm)?", kind="numeric", unit="mm", reason="functional_geometry"),
+            _spec("desk_thickness_mm", "What is the desk thickness (mm)?", kind="numeric", unit="mm", reason="attachment_interface"),
+            _spec("attachment_method", "How should it attach?", kind="categorical", options=["clamp", "screws", "adhesive"], reason="mounting_method"),
+            _spec("allowed_contact_region", "Where on the desk may it mount?", kind="categorical", options=["desk_front_edge", "desk_top", "desk_underside"], reason="attachment_interface"),
+            _spec("max_protrusion_mm", "How far may it extend (mm)?", kind="numeric", unit="mm", reason="design_envelope"),
+            _spec("manufacturing_method", "How will it be made?", kind="categorical", options=["3d_print", "fdm", "sla"], reason="manufacturing_constraint", priority="medium"),
+        ]
+    if task == TASK_BED_HANDLE:
+        return [
+            _spec("supported_load_kg", "What load should it support (kg)?", kind="numeric", unit="kg", reason="load_case"),
+            _spec("attachment_structure", "What should it attach to?", kind="categorical", options=["bed_frame", "headboard", "mattress_edge", "wall", "other"], reason="attachment_interface"),
+            _spec("handle_location", "Where should the handle be?", kind="categorical", options=["bedside", "headboard", "mattress_edge", "other"], reason="functional_geometry"),
+            _spec("mounting_region", "Where can it mount?", kind="categorical", options=["bed_frame", "headboard", "wall", "other"], reason="attachment_interface"),
+            _spec("drilling_allowed", "Is drilling allowed?", kind="boolean", reason="user_constraint"),
+            _spec("required_reach_mm", "How much reach does the handle need (mm)?", kind="numeric", unit="mm", reason="clearance"),
+            _spec("manufacturing_method", "How will it be made?", kind="categorical", options=["3d_print", "fdm", "sla"], reason="manufacturing_constraint", priority="medium"),
+        ]
+    if task == TASK_WALL_SHELF:
+        return [
+            _spec("supported_load_kg", "What load should it support (kg)?", kind="numeric", unit="kg", reason="load_case"),
+            _spec("payload_size_mm", "What is the object size (mm)?", kind="numeric", unit="mm", reason="functional_geometry"),
+            _spec("attachment_method", "How should it attach to the wall?", kind="categorical", options=["screws", "adhesive", "other"], reason="mounting_method"),
+            _spec("mounting_region", "Where on the wall may it mount?", kind="text", reason="attachment_interface"),
+            _spec("wall_clearance_mm", "How much clearance is needed (mm)?", kind="numeric", unit="mm", reason="clearance"),
+            _spec("manufacturing_method", "How will it be made?", kind="categorical", options=["3d_print", "fdm", "sla"], reason="manufacturing_constraint", priority="medium"),
+        ]
+    return [
+        _spec("supported_load_kg", "What load should it support (kg)?", kind="numeric", unit="kg", reason="load_case"),
+        _spec("attachment_structure", "What should it attach to?", kind="text", reason="attachment_interface"),
+        _spec("attachment_method", "How should it attach?", kind="categorical", options=["clamp", "screws", "adhesive", "other"], reason="mounting_method"),
+        _spec("required_reach_mm", "How far may it extend (mm)?", kind="numeric", unit="mm", reason="design_envelope"),
+        _spec("manufacturing_method", "How will it be made?", kind="categorical", options=["3d_print", "fdm", "sla"], reason="manufacturing_constraint", priority="medium"),
+    ]
+
 
 class InteractionAgent:
     """Extracts known requirements and decides PROCEED / REQUEST / REJECT."""
@@ -211,12 +319,14 @@ class InteractionAgent:
         req.user_message = message
         if not req.description:
             req.description = message.strip()
+        req.task_kind = classify_design_task(message)
         self._extract_keywords(req, lowered)
         return self._decide(req)
 
     def apply_update(
         self, requirements: UserRequirements, update: RequirementsUpdate
     ) -> InteractionResult:
+        extras = dict(requirements.task_answers or {})
         if update.filled_bottle_mass_kg is not None:
             requirements.payload.filled_mass_kg = update.filled_bottle_mass_kg
         if update.bottle_diameter_mm is not None:
@@ -239,16 +349,71 @@ class InteractionAgent:
             requirements.manufacturing.material = update.material
         if update.max_part_mass_kg is not None:
             requirements.part_mass.max_part_mass_kg = update.max_part_mass_kg
+        if update.supported_load_kg is not None:
+            extras["supported_load_kg"] = update.supported_load_kg
+            if requirements.payload.filled_mass_kg is None:
+                requirements.payload.filled_mass_kg = update.supported_load_kg
+        if update.payload_size_mm is not None:
+            extras["payload_size_mm"] = update.payload_size_mm
+            if requirements.object_geometry.bottle_diameter_mm is None:
+                requirements.object_geometry.bottle_diameter_mm = update.payload_size_mm
+        if update.required_reach_mm is not None:
+            extras["required_reach_mm"] = update.required_reach_mm
+            if requirements.design_envelope.max_protrusion_mm is None:
+                requirements.design_envelope.max_protrusion_mm = update.required_reach_mm
+        if update.wall_clearance_mm is not None:
+            extras["wall_clearance_mm"] = update.wall_clearance_mm
+            if requirements.design_envelope.max_width_mm is None:
+                requirements.design_envelope.max_width_mm = update.wall_clearance_mm
+        if update.attachment_structure is not None:
+            extras["attachment_structure"] = update.attachment_structure
+            if requirements.attachment.allowed_contact_region is None:
+                requirements.attachment.allowed_contact_region = update.attachment_structure
+        if update.handle_location is not None:
+            extras["handle_location"] = update.handle_location
+        if update.mounting_region is not None:
+            extras["mounting_region"] = update.mounting_region
+            if requirements.attachment.allowed_contact_region is None:
+                requirements.attachment.allowed_contact_region = update.mounting_region
+        if update.drilling_allowed is not None:
+            extras["drilling_allowed"] = update.drilling_allowed
+        requirements.task_answers = extras
+        if not requirements.task_kind:
+            requirements.task_kind = classify_design_task(
+                requirements.user_message or requirements.description
+            )
         return self._decide(requirements)
 
     def _extract_keywords(self, req: UserRequirements, lowered: str) -> None:
-        for keyword, description, kind in PAYLOAD_KEYWORDS:
-            if keyword in lowered:
-                req.payload.description = description
-                req.object_geometry.kind = kind
-                break
-        if "desk" in lowered:
+        task = req.task_kind or classify_design_task(lowered)
+        req.task_kind = task
+        if task == TASK_CUPHOLDER:
+            for keyword, description, kind in PAYLOAD_KEYWORDS:
+                if keyword in {"hook", "bag", "shelf", "stapler"}:
+                    continue
+                if keyword in lowered:
+                    req.payload.description = description
+                    req.object_geometry.kind = kind
+                    break
+            else:
+                req.payload.description = req.payload.description or "bottle"
+                req.object_geometry.kind = req.object_geometry.kind or "cylinder"
             req.environment.kind = "desk_plane"
+        elif task == TASK_DESK_HOOK:
+            req.payload.description = "bag"
+            req.object_geometry.kind = "strap"
+            req.environment.kind = "desk_plane"
+        elif task == TASK_DESK_SHELF:
+            req.payload.description = "object"
+            req.object_geometry.kind = "box"
+            req.environment.kind = "desk_plane"
+        elif task == TASK_WALL_SHELF:
+            req.payload.description = "router" if "router" in lowered else "object"
+            req.object_geometry.kind = "box"
+            req.environment.kind = "wall"
+        elif task == TASK_BED_HANDLE:
+            req.payload.description = "assist_load"
+            req.environment.kind = "bed"
         if "1 l" in lowered or "1l" in lowered or "one liter" in lowered:
             req.payload.volume_l = 1.0
         if "clamp" in lowered:
@@ -263,13 +428,22 @@ class InteractionAgent:
     def _decide(self, req: UserRequirements) -> InteractionResult:
         missing = self._missing(req)
         questions = [
-            ClarificationQuestion(field=m.field, question=m.reason, priority=m.priority)
-            for m in missing
+            ClarificationQuestion(
+                field=spec["field"],
+                question=spec["question"],
+                priority=spec.get("priority") or "high",
+                kind=spec.get("kind"),
+                unit=spec.get("unit"),
+                options=spec.get("options"),
+                reason=spec.get("reason"),
+                source=spec.get("source"),
+            )
+            for spec in missing
         ]
         vision = VisionRequest(
             want_environment_photo=True,
             want_reference_object=True,
-            requested_measurements=[m.field for m in missing],
+            requested_measurements=[spec["field"] for spec in missing],
             notes=(
                 "Vision is not implemented. A later step may request a photo, "
                 "a known-size reference object, and critical measurements."
@@ -297,8 +471,11 @@ class InteractionAgent:
             vision_request=resolved_vision,
         )
 
-    def _missing(self, req: UserRequirements) -> List[MissingInformation]:
-        values = {
+    def _field_value(self, req: UserRequirements, field: str) -> object:
+        extras = req.task_answers or {}
+        if field in extras and extras[field] not in (None, ""):
+            return extras[field]
+        mapped = {
             "filled_bottle_mass_kg": req.payload.filled_mass_kg,
             "bottle_diameter_mm": req.object_geometry.bottle_diameter_mm,
             "desk_thickness_mm": req.environment.desk_thickness_mm,
@@ -306,16 +483,28 @@ class InteractionAgent:
             "allowed_contact_region": req.attachment.allowed_contact_region,
             "max_protrusion_mm": req.design_envelope.max_protrusion_mm,
             "manufacturing_method": req.manufacturing.method,
+            "supported_load_kg": req.payload.filled_mass_kg,
+            "payload_size_mm": req.object_geometry.bottle_diameter_mm,
+            "required_reach_mm": req.design_envelope.max_protrusion_mm,
+            "wall_clearance_mm": req.design_envelope.max_width_mm,
+            "attachment_structure": extras.get("attachment_structure"),
+            "handle_location": extras.get("handle_location"),
+            "mounting_region": extras.get("mounting_region") or req.attachment.allowed_contact_region,
+            "drilling_allowed": extras.get("drilling_allowed"),
         }
+        return mapped.get(field)
+
+    def _field_answered(self, req: UserRequirements, field: str) -> bool:
+        value = self._field_value(req, field)
+        if field == "drilling_allowed":
+            return value is not None
+        return bool(value)
+
+    def _missing(self, req: UserRequirements) -> List[dict]:
+        task = req.task_kind or classify_design_task(req.user_message or req.description)
         payload = req.payload.description or "payload"
-        missing: List[MissingInformation] = []
-        for field, question, priority in REQUIRED_FIELDS:
-            if not values.get(field):
-                if field == "bottle_diameter_mm":
-                    question = SIZE_QUESTIONS.get(req.object_geometry.kind, question)
-                missing.append(
-                    MissingInformation(
-                        field=field, reason=question.format(payload=payload), priority=priority
-                    )
-                )
-        return missing
+        return [
+            spec
+            for spec in clarification_specs_for_task(task, payload)
+            if not self._field_answered(req, spec["field"])
+        ]

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import html
 import json
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -57,9 +59,21 @@ from reasoning import (
 )
 from reasoning_contracts import ReasoningMode, ReasoningOutcome
 from tools.warmstart import generate_warm_start
+from tools.registration import (
+    CAPTURE_GUIDANCE,
+    DEFAULT_OUT_ROOT as REGISTRATION_OUT_ROOT,
+    MAX_IMAGES,
+    MIN_IMAGES,
+    RECOMMENDED_IMAGES,
+    UploadedPhoto,
+    run_sample_registration,
+    run_registration,
+    stage_uploads,
+)
 from schemas import (
     InteractionResult,
     MassProvenance,
+    MissingInformation,
     RequirementsUpdate,
     SceneObservation,
     StructureInput,
@@ -76,14 +90,21 @@ from ui_inspect import (
     iteration_cards,
     pipeline_status,
 )
+from ui_failure import STAGE_RECONSTRUCTION, detect_ui_failure
 from ui_flow import (
     ActionSpec,
+    WORKSPACE_TAB_OPTIMIZATION,
+    WORKSPACE_TAB_SCENE,
+    WORKSPACE_TABS,
     action_spec,
+    backend_missing_fields,
     design_summary_rows,
     missing_detail_count,
     need_details_title,
+    reconstructed_scene_status,
     scene_status_text,
     stepper_states,
+    workspace_tab_after_event,
 )
 from ui_viz import (
     geometry_figure,
@@ -104,6 +125,10 @@ NUMERIC_FIELDS = {
     "desk_thickness_mm",
     "max_protrusion_mm",
     "max_part_mass_kg",
+    "supported_load_kg",
+    "payload_size_mm",
+    "required_reach_mm",
+    "wall_clearance_mm",
 }
 SELECT_FIELDS = {
     "attachment_method": ["clamp", "screws", "adhesive"],
@@ -122,6 +147,14 @@ FIELD_COPY: Dict[str, Tuple[str, Optional[str]]] = {
     "manufacturing_method": ("How will it be made?", None),
     "material": ("Material", None),
     "max_part_mass_kg": ("Max part mass", "kg"),
+    "supported_load_kg": ("Supported load", "kg"),
+    "payload_size_mm": ("Object size", "mm"),
+    "required_reach_mm": ("Required reach", "mm"),
+    "wall_clearance_mm": ("Clearance", "mm"),
+    "attachment_structure": ("What should it attach to?", None),
+    "handle_location": ("Where should the handle be?", None),
+    "mounting_region": ("Where can it mount?", None),
+    "drilling_allowed": ("Is drilling allowed?", None),
 }
 CATEGORY_CHOICES: Dict[str, List[Tuple[str, str]]] = {
     "attachment_method": [
@@ -141,6 +174,25 @@ CATEGORY_CHOICES: Dict[str, List[Tuple[str, str]]] = {
         ("3d_print", "3D print"),
         ("fdm", "FDM"),
         ("sla", "SLA"),
+        ("other", "Other"),
+    ],
+    "attachment_structure": [
+        ("bed_frame", "Bed frame"),
+        ("headboard", "Headboard"),
+        ("mattress_edge", "Mattress edge"),
+        ("wall", "Wall"),
+        ("other", "Other"),
+    ],
+    "handle_location": [
+        ("bedside", "Bedside"),
+        ("headboard", "Headboard"),
+        ("mattress_edge", "Mattress edge"),
+        ("other", "Other"),
+    ],
+    "mounting_region": [
+        ("bed_frame", "Bed frame"),
+        ("headboard", "Headboard"),
+        ("wall", "Wall"),
         ("other", "Other"),
     ],
 }
@@ -170,6 +222,42 @@ BADGE_COLORS = {
 
 
 ACTION_ANCHOR_ID = "mdc-current-action"
+API_NOT_CONNECTED = "API not connected"
+GENERATION_FAILED_VALIDATION = "Generation failed validation"
+BRAND_TITLE = "On TOP of the World"
+BRAND_TAGLINE = "Snap it. TOPtimize it. Print it."
+BRAND_SUB = (
+    "Take a photo. Get a lightweight custom part designed to fit your space, "
+    "powered by TOPology optimization."
+)
+SCENE_PHOTO_HELP = (
+    f"Minimum {MIN_IMAGES} photos. {RECOMMENDED_IMAGES}–{MAX_IMAGES} overlapping views work best."
+)
+
+
+def reconstruction_photo_status(count: int, min_images: int = MIN_IMAGES) -> Dict[str, Any]:
+    """Capture-contract copy for the reconstruction uploader. 14–18 stays out of this."""
+    n = max(0, int(count))
+    needed = max(0, int(min_images) - n)
+    noun = "photo" if needed == 1 else "photos"
+    return {
+        "count": n,
+        "min_images": int(min_images),
+        "ready": needed == 0,
+        "needed": needed,
+        "count_label": f"{n} photo" if n == 1 else f"{n} photos",
+        "min_label": f"minimum {min_images}",
+        "action": f"Add {needed} more {noun}" if needed else "Ready to reconstruct",
+    }
+
+
+def generator_status_message(configured: bool, warm_start: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """Product-facing Grok status. Missing API is never treated as a validation failure."""
+    if not configured:
+        return API_NOT_CONNECTED
+    if warm_start and warm_start.get("ok") is False:
+        return GENERATION_FAILED_VALIDATION
+    return None
 
 
 def field_widget_kind(question: Any) -> str:
@@ -279,16 +367,78 @@ def _topology_options():
     )
 
 
+def _run_print(message: str) -> None:
+    """Immediate terminal log for the Streamlit process. Does not change workflow state."""
+    print(message, flush=True)
+
+
+def _warm_start_mesh_path(candidate=None) -> str:
+    cand = candidate
+    if cand is None:
+        orch = st.session_state.get("orch")
+        cand = getattr(orch, "imported_candidate", None) if orch is not None else None
+    if cand is None:
+        cand = st.session_state.get("warm_start_candidate")
+    path = getattr(cand, "mesh_path", None) if cand is not None else None
+    if path:
+        return str(path)
+    ws = st.session_state.get("warm_start_result") or {}
+    out_dir = ws.get("out_dir") or ""
+    if out_dir:
+        stl = Path(out_dir) / "grok_warmstart.stl"
+        if stl.is_file():
+            return str(stl)
+        return str(out_dir)
+    return ""
+
+
+def _warm_start_is_valid(candidate=None) -> bool:
+    ws = st.session_state.get("warm_start_result") or {}
+    if ws.get("ok") is False:
+        return False
+    path = _warm_start_mesh_path(candidate)
+    if path and Path(path).is_file() and Path(path).stat().st_size > 0:
+        return True
+    if candidate is not None and getattr(candidate, "mesh_path", None):
+        return Path(candidate.mesh_path).is_file()
+    return bool(ws.get("ok") and candidate is not None)
+
+
+def _session_warm_start_candidate():
+    cand = st.session_state.get("warm_start_candidate")
+    if cand is not None and _warm_start_is_valid(cand):
+        return cand
+    orch = st.session_state.get("orch")
+    existing = getattr(orch, "imported_candidate", None) if orch is not None else None
+    if existing is not None and getattr(existing, "task", "") == "generated" and _warm_start_is_valid(existing):
+        return existing
+    return None
+
+
 def _warm_start_generator():
     """Generator callable for the GEOMETRY stage when the geometry source is Grok-generated."""
     if effective_geometry_mode(st.session_state.get("mode_geom")) != GEOM_GENERATED:
         return None
+    load_dotenv()
+    load_dotenv(Path(__file__).resolve().parent / ".env")
     provider = get_provider("grok")
     if not provider.configured:
         return None
 
     def _generate(requirements):
-        result = generate_warm_start(requirements, provider, name="grok_warmstart")
+        reused = _session_warm_start_candidate()
+        if reused is not None:
+            _run_print("[GROK] GENERATION skipped — valid warm-start mesh already exists")
+            _run_print(f"[RUN] warm start path = {_warm_start_mesh_path(reused)}")
+            return reused
+        _run_print("[GROK] GENERATION_STARTED")
+        try:
+            result = generate_warm_start(requirements, provider, name="grok_warmstart")
+        except Exception:
+            _run_print("[GROK] GENERATION_FAILED")
+            _run_print("[RUN] EXCEPTION at GROK_GENERATION")
+            traceback.print_exc()
+            raise
         st.session_state.warm_start_result = {
             "ok": result.ok,
             "model": result.model,
@@ -300,7 +450,11 @@ def _warm_start_generator():
             "error": result.error[-600:],
         }
         if not result.ok:
+            _run_print("[GROK] GENERATION_FAILED")
             raise RuntimeError(result.error or "; ".join(result.problems) or "generation failed")
+        st.session_state.warm_start_candidate = result.candidate
+        _run_print("[GROK] GENERATION_FINISHED")
+        _run_print(f"[RUN] warm start path = {getattr(result.candidate, 'mesh_path', '')}")
         return result.candidate
 
     return _generate
@@ -318,7 +472,10 @@ def _registration_measurements() -> Optional[Dict[str, Any]]:
         st.session_state.registration_meas = None
         return None
     cached = st.session_state.get("registration_meas")
-    if cached and cached.get("target_json") == path:
+    if cached and (
+        cached.get("source_mesh") == str(Path(path).expanduser().resolve())
+        or cached.get("target_json") == path
+    ):
         return cached
     try:
         from to_agent.ingest.surfcap import measurements_from_path
@@ -351,6 +508,67 @@ def _live_registration():
     )
 
 
+def _run_grounding_surface_registration() -> None:
+    """Stage UI uploads (or use a local folder), run surfcap, and queue its target path."""
+    st.session_state.registration_error = ""
+    uploads = (
+        st.session_state.get("reg_capture_photos")
+        or st.session_state.get("scene_photo")
+        or []
+    )
+    folder_text = (st.session_state.get("reg_capture_folder") or "").strip()
+    try:
+        if uploads:
+            capture_dir = (
+                REGISTRATION_OUT_ROOT
+                / "captures"
+                / (
+                    f"capture_{time.strftime('%Y%m%d_%H%M%S')}_"
+                    f"{time.time_ns() % 1_000_000:06d}"
+                )
+            )
+            photos = [
+                UploadedPhoto(name=item.name, data=item.getvalue())
+                for item in uploads
+            ]
+            source, capture_warnings = stage_uploads(photos, capture_dir)
+        elif folder_text:
+            source = Path(folder_text).expanduser()
+            capture_warnings = []
+        else:
+            raise ValueError("Upload a photo set or provide a local capture folder.")
+
+        result = run_registration(
+            source,
+            table_prompt=st.session_state.get("reg_table_prompt") or "table",
+        )
+        result.warnings = list(dict.fromkeys(capture_warnings + result.warnings))
+        st.session_state.registration_run = result
+        if not result.ok:
+            st.session_state.registration_error = result.message
+            return
+        st.session_state.pending_reg_target_path = result.target_json
+        st.session_state.registration_meas = result.measurements
+        _queue_workspace_tab(workspace_tab_after_event(reconstruction=True))
+    except Exception as exc:  # noqa: BLE001 — show capture/tool failures in the UI
+        st.session_state.registration_run = None
+        st.session_state.registration_error = f"{type(exc).__name__}: {exc}"
+
+
+def _load_table_a_registration() -> None:
+    """Run the callable registration skill against the bundled table_a capture."""
+    st.session_state.registration_error = ""
+    result = run_sample_registration("table_a")
+    st.session_state.registration_run = result
+    if not result.ok:
+        st.session_state.registration_error = result.message
+        return
+    measurement_path = result.artifacts.get("hybrid_mesh") or result.target_json
+    st.session_state.pending_reg_target_path = measurement_path
+    st.session_state.registration_meas = result.measurements
+    _queue_workspace_tab(workspace_tab_after_event(reconstruction=True))
+
+
 def _new_orchestrator() -> Orchestrator:
     mode = effective_geometry_mode(st.session_state.get("mode_geom"))
     return Orchestrator(
@@ -363,6 +581,20 @@ def _new_orchestrator() -> Orchestrator:
 
 HOOK_CASE_MESSAGE = "I want a hook clamped under my desk edge to hang a 5 kg bag about 100 mm out from the edge."
 SHELF_CASE_MESSAGE = "I want a small shelf that lifts my stapler 100 mm above the desk with a flat top."
+SMALL_BOTTLE_CASE_MESSAGE = "Design a desk-clamped holder for a 0.5 kg, 66 mm diameter water bottle."
+SMALL_BOTTLE_CASE_ANSWERS = {
+    "filled_bottle_mass_kg": 0.5,
+    "bottle_diameter_mm": 66.0,
+    "bottle_height_mm": 130.0,
+    "desk_thickness_mm": 20.0,
+    "attachment_method": "clamp",
+    "allowed_contact_region": "desk_front_edge",
+    "attachment_notes": "clamp only, no drilling",
+    "max_protrusion_mm": 100.0,
+    "manufacturing_method": "3d_print",
+    "material": "PLA",
+    "max_part_mass_kg": 0.4,
+}
 HOOK_CASE_ANSWERS = {
     "filled_bottle_mass_kg": 5.0,
     "bottle_diameter_mm": 30.0,
@@ -401,6 +633,37 @@ def apply_pending_request_prefill(store: Dict[str, Any]) -> None:
     if pending is not None:
         store["request_text"] = pending
         store["pending_request_prefill"] = None
+
+
+def apply_pending_registration_path(store: Dict[str, Any]) -> None:
+    """Move a completed run's target path into the text widget before construction."""
+    pending = store.get("pending_reg_target_path")
+    if pending is not None:
+        store["reg_target_path"] = pending
+        store["pending_reg_target_path"] = None
+
+
+def apply_trusted_registration_answers(store: Dict[str, Any]) -> None:
+    """Trusted surfcap measurements can satisfy a clarification field without showing it."""
+    meas = store.get("registration_meas") or {}
+    if not meas.get("prefill") or meas.get("desk_thickness_mm") is None:
+        return
+    answers = store.setdefault("answers", {})
+    if answers.get("desk_thickness_mm") in (None, "", 0, 0.0):
+        answers["desk_thickness_mm"] = float(meas["desk_thickness_mm"])
+
+
+def apply_pending_workspace_tab(store: Dict[str, Any]) -> None:
+    """Move an auto-selected workspace tab into the widget key before construction."""
+    pending = store.get("pending_workspace_tab")
+    if pending in WORKSPACE_TABS:
+        store["workspace_tab"] = pending
+    store["pending_workspace_tab"] = None
+
+
+def _queue_workspace_tab(tab: str) -> None:
+    st.session_state.pending_workspace_tab = tab
+    st.session_state.workspace_tab = tab
 
 
 REASONING_CHOICES = ["Mock", "K2 Horizon", "Grok", "Cursor"]
@@ -453,6 +716,12 @@ def _init_session() -> None:
         st.session_state.compare = None
     if "pending_request_prefill" not in st.session_state:
         st.session_state.pending_request_prefill = None
+    if "pending_reg_target_path" not in st.session_state:
+        st.session_state.pending_reg_target_path = None
+    if "registration_run" not in st.session_state:
+        st.session_state.registration_run = None
+    if "registration_error" not in st.session_state:
+        st.session_state.registration_error = ""
     if "submitted_request" not in st.session_state:
         st.session_state.submitted_request = ""
     if "ui_notice" not in st.session_state:
@@ -467,16 +736,31 @@ def _init_session() -> None:
         st.session_state.cursor_compare = None
     if "pending_analyze" not in st.session_state:
         st.session_state.pending_analyze = False
+    if "pending_registration" not in st.session_state:
+        st.session_state.pending_registration = False
     if "example_choice" not in st.session_state:
         st.session_state.example_choice = EXAMPLE_CHOICES[0]
     if "request_text" not in st.session_state and not st.session_state.pending_request_prefill:
         st.session_state.request_text = HAPPY_PATH_MESSAGE
     if "scroll_to_action" not in st.session_state:
         st.session_state.scroll_to_action = False
+    if "workspace_tab" not in st.session_state:
+        st.session_state.workspace_tab = WORKSPACE_TAB_SCENE
+    if "pending_workspace_tab" not in st.session_state:
+        st.session_state.pending_workspace_tab = None
+    if "focus_constraint_field" not in st.session_state:
+        st.session_state.focus_constraint_field = None
+    if "warm_start_result" not in st.session_state:
+        st.session_state.warm_start_result = None
+    if "warm_start_candidate" not in st.session_state:
+        st.session_state.warm_start_candidate = None
 
 
 def _apply_pending_prefills() -> None:
     apply_pending_request_prefill(st.session_state)
+    apply_pending_registration_path(st.session_state)
+    apply_trusted_registration_answers(st.session_state)
+    apply_pending_workspace_tab(st.session_state)
 
 
 def _clear_answer_widgets() -> None:
@@ -506,6 +790,9 @@ def _reset(
     st.session_state.scene_observation_meta = {}
     st.session_state.ui_notice = ""
     st.session_state.last_chat_error_key = None
+    st.session_state.warm_start_result = None
+    st.session_state.warm_start_candidate = None
+    st.session_state.focus_constraint_field = None
     _clear_answer_widgets()
     if request_prefill is not None:
         st.session_state.pending_request_prefill = request_prefill
@@ -519,6 +806,7 @@ def _reset(
         _ingest(ingest_message)
     elif request_prefill is not None:
         st.session_state.submitted_request = ""
+    _queue_workspace_tab(WORKSPACE_TAB_SCENE)
 
 
 def _append(role: str, text: str, error_key: Optional[tuple] = None) -> None:
@@ -529,7 +817,24 @@ def _append(role: str, text: str, error_key: Optional[tuple] = None) -> None:
     st.session_state.chat.append({"role": role, "text": text})
 
 
+def _current_failure():
+    orch = st.session_state.get("orch")
+    state = getattr(orch, "state", None)
+    if state is None:
+        return None
+    return detect_ui_failure(
+        state,
+        warm_start=st.session_state.get("warm_start_result"),
+        registration_error=st.session_state.get("registration_error") or "",
+        registration_run=st.session_state.get("registration_run"),
+        warm_start_error=getattr(orch, "warm_start_error", "") or "",
+    )
+
+
 def _assistant_after_interaction(state: DesignState) -> str:
+    failure = _current_failure()
+    if failure is not None:
+        return failure.headline
     if state.stage == WorkflowStage.REJECTED:
         return f"Out of scope. {state.reject_reason or 'This request cannot continue.'}"
     if state.stage == WorkflowStage.REQUEST_INFORMATION:
@@ -567,6 +872,51 @@ def _answers_to_update() -> RequirementsUpdate:
     return RequirementsUpdate.model_validate(payload)
 
 
+def _refresh_clarifications_from_backend(orch: Orchestrator) -> None:
+    """Keep the widgets in sync with InteractionAgent._missing after a bounce."""
+    req = orch.state.requirements
+    if req is None:
+        return
+    result = orch.interaction._decide(req)
+    orch.state.clarifications = result.questions
+    orch.state.missing_information = [
+        MissingInformation(field=q.field, reason=q.question, priority=q.priority)
+        for q in result.questions
+    ]
+
+
+def _preserve_supplied_answers(state: DesignState) -> None:
+    """Keep already-entered answers after the backend asks for remaining fields."""
+    answers = dict(st.session_state.get("answers") or {})
+    req = state.requirements
+    if req is None:
+        st.session_state.answers = answers
+        return
+    extras = dict(req.task_answers or {})
+    mapped = {
+        "filled_bottle_mass_kg": req.payload.filled_mass_kg,
+        "supported_load_kg": extras.get("supported_load_kg") or req.payload.filled_mass_kg,
+        "bottle_diameter_mm": req.object_geometry.bottle_diameter_mm,
+        "payload_size_mm": extras.get("payload_size_mm") or req.object_geometry.bottle_diameter_mm,
+        "desk_thickness_mm": req.environment.desk_thickness_mm,
+        "attachment_method": req.attachment.method,
+        "allowed_contact_region": req.attachment.allowed_contact_region,
+        "attachment_structure": extras.get("attachment_structure"),
+        "handle_location": extras.get("handle_location"),
+        "mounting_region": extras.get("mounting_region") or req.attachment.allowed_contact_region,
+        "drilling_allowed": extras.get("drilling_allowed"),
+        "max_protrusion_mm": req.design_envelope.max_protrusion_mm,
+        "required_reach_mm": extras.get("required_reach_mm") or req.design_envelope.max_protrusion_mm,
+        "manufacturing_method": req.manufacturing.method,
+        "wall_clearance_mm": extras.get("wall_clearance_mm") or req.design_envelope.max_width_mm,
+    }
+    for key, value in {**mapped, **extras}.items():
+        if value in (None, "") or answers.get(key) not in (None, ""):
+            continue
+        answers[key] = value
+    st.session_state.answers = answers
+
+
 def _queue_request_text(message: str) -> None:
     """Update the design-request box. Call only from on_click callbacks.
 
@@ -595,12 +945,28 @@ def _on_missing_info() -> None:
 
 def _load_live_case(candidate: str, message: str, answers: Dict[str, Any]) -> None:
     """Preset: imported candidate + live topology, request and answers prefilled."""
+    answers = dict(answers)
+    registration = st.session_state.get("registration_meas") or {}
+    if registration.get("prefill") and registration.get("desk_thickness_mm") is not None:
+        answers["desk_thickness_mm"] = float(registration["desk_thickness_mm"])
     st.session_state.mode_geom = GEOM_IMPORTED
     st.session_state.candidate_name = candidate
     st.session_state.mode_topo = "Live"
     _queue_request_text(message)
     _reset(ingest_message=message, prefill_happy=False)
-    st.session_state.answers = dict(answers)
+    st.session_state.answers = answers
+
+
+def _on_bottle_case() -> None:
+    answers = dict(SMALL_BOTTLE_CASE_ANSWERS)
+    registration = st.session_state.get("registration_meas") or {}
+    if registration.get("prefill") and registration.get("desk_thickness_mm") is not None:
+        answers["desk_thickness_mm"] = float(registration["desk_thickness_mm"])
+    st.session_state.mode_geom = GEOM_ADAPTIVE
+    st.session_state.mode_topo = "Live"
+    _queue_request_text(SMALL_BOTTLE_CASE_MESSAGE)
+    _reset(ingest_message=SMALL_BOTTLE_CASE_MESSAGE, prefill_happy=False)
+    st.session_state.answers = answers
 
 
 def _on_hook_case() -> None:
@@ -632,6 +998,7 @@ EXAMPLE_CHOICES = (
     "Rejected",
     "Desk hook (live TO)",
     "Stapler shelf (live TO)",
+    "Small bottle holder (live TO)",
 )
 _EXAMPLE_LOADERS = {
     "Happy Path": _on_happy_path,
@@ -639,6 +1006,7 @@ _EXAMPLE_LOADERS = {
     "Rejected": _on_rejected,
     "Desk hook (live TO)": _on_hook_case,
     "Stapler shelf (live TO)": _on_shelf_case,
+    "Small bottle holder (live TO)": _on_bottle_case,
 }
 
 
@@ -651,14 +1019,98 @@ def _on_load_example() -> None:
 
 def _on_primary_action() -> None:
     """One entry point for the current-action button. Same backend calls as before."""
-    spec = action_spec(st.session_state.orch.state, st.session_state.get("answers"))
+    sync_answer_widgets(st.session_state)
+    spec = action_spec(
+        st.session_state.orch.state,
+        st.session_state.get("answers"),
+        failure=_current_failure(),
+    )
+    from_optimize = spec.kind == "optimize" or spec.button == "Run optimization"
+    if from_optimize:
+        _run_print("[RUN] RUN_OPT_CLICKED")
+        _run_print(f"[RUN] current geometry source = {st.session_state.get('mode_geom')}")
+        reused = _session_warm_start_candidate()
+        _run_print(f"[RUN] warm start exists = {bool(reused is not None or _warm_start_is_valid())}")
+        _run_print(f"[RUN] warm start path = {_warm_start_mesh_path(reused)}")
+        _run_print(
+            f"[RUN] stage={getattr(st.session_state.orch.state.stage, 'value', st.session_state.orch.state.stage)} "
+            f"spec.kind={spec.kind} button={spec.button!r}"
+        )
     if spec.kind == "start":
+        if from_optimize:
+            _run_print("[RUN] BLOCKED: action_spec rerouted to start")
         _on_submit_request()
     elif spec.kind in ("continue", "optimize"):
-        _continue_design()
+        _continue_design(from_optimize=from_optimize)
+    elif spec.kind == "retry":
+        if from_optimize:
+            _run_print("[RUN] BLOCKED: action_spec rerouted to retry")
+        _retry_same_constraints()
     elif spec.kind == "revise":
+        if from_optimize:
+            _run_print("[RUN] BLOCKED: action_spec rerouted to revise")
         _reset()
         mark_ui_transition(st.session_state)
+    else:
+        if from_optimize:
+            _run_print(f"[RUN] BLOCKED: unhandled action kind={spec.kind}")
+    if from_optimize:
+        _run_print("[RUN] RERUN_REQUESTED")
+
+
+def _retry_same_constraints() -> None:
+    """Rerun generation/optimization with the same answers. Does not change constraints."""
+    sync_answer_widgets(st.session_state)
+    answers = dict(st.session_state.get("answers") or {})
+    message = st.session_state.get("submitted_request") or _current_request_text()
+    st.session_state.warm_start_result = None
+    st.session_state.warm_start_candidate = None
+    st.session_state.orch = _new_orchestrator()
+    st.session_state.answers = answers
+    mark_ui_transition(st.session_state)
+    _sync_orch_fixtures()
+    if not message:
+        st.session_state.ui_notice = "Write a design request first."
+        return
+    orch: Orchestrator = st.session_state.orch
+    orch.ingest_user_request(message)
+    orch.apply_answers(_answers_to_update())
+    st.session_state.answers = answers
+    if orch.state.stage not in (
+        WorkflowStage.COMPLETE,
+        WorkflowStage.REJECTED,
+        WorkflowStage.REQUEST_INFORMATION,
+        WorkflowStage.DESIGN_REVIEW_FAILED,
+    ):
+        if _topology_live() or orch.warm_start_generator is not None:
+            _run_with_progress(orch)
+        else:
+            orch.run()
+    _append("assistant", _user_result_message(orch.state))
+    if orch.state.topology is not None or orch.state.geometry is not None or orch.state.structure is not None:
+        _queue_workspace_tab(
+            workspace_tab_after_event(
+                design=orch.state.geometry is not None or orch.state.structure is not None,
+                topology=orch.state.topology is not None,
+            )
+        )
+
+
+def _focus_constraint_field(field: str) -> None:
+    st.session_state.focus_constraint_field = field
+    mark_ui_transition(st.session_state)
+
+
+@st.dialog("Full log", width="large")
+def _failure_log_dialog() -> None:
+    card = st.session_state.get("failure_log_card")
+    if card is None:
+        st.write("No log available.")
+        return
+    st.caption(card.stage.replace("_", " "))
+    st.code(card.raw_log or "(empty)", language="text")
+    if st.button("Close"):
+        st.rerun()
 
 
 def _on_submit_request() -> None:
@@ -674,31 +1126,76 @@ def _on_submit_request() -> None:
     _ingest(message)
 
 
+def _stored_choice_value(field: str, value: Any) -> Any:
+    """Map a pill label back to the backend stored value when needed."""
+    if value in (None, ""):
+        return value
+    text = str(value)
+    for stored, label in CATEGORY_CHOICES.get(field, ()):
+        if text in (stored, label):
+            return stored
+    for stored in SELECT_FIELDS.get(field, ()):
+        if text == stored or text == stored.replace("_", " ").strip().title():
+            return stored
+    return value
+
+
+def sync_answer_widgets(store: Dict[str, Any]) -> None:
+    """Copy current clarification widget values before an on-click callback consumes them."""
+    answers = store.setdefault("answers", {})
+    for key in list(store.keys()):
+        if not key.startswith("ans_") or key.endswith("_other"):
+            continue
+        field = key.removeprefix("ans_")
+        raw = store[key]
+        if raw in (None, ""):
+            continue
+        mapped = _stored_choice_value(field, raw)
+        if mapped == "other":
+            custom = store.get(f"ans_{field}_other")
+            mapped = (custom or "").strip() or mapped
+        answers[field] = mapped
+    if store.get("no_drill"):
+        answers["attachment_notes"] = "clamp only, no drilling"
+
+
 def _on_continue_design() -> None:
+    sync_answer_widgets(st.session_state)
     _continue_design()
 
 
 def _sync_orch_fixtures() -> None:
     orch: Orchestrator = st.session_state.orch
     if orch.state.geometry is not None:
+        _run_print("[RUN] _sync_orch_fixtures skipped — geometry already present")
         return
     mode = st.session_state.get("mode_geom")
+    existing = orch.imported_candidate
     orch.fixtures = fixtures_for_geometry_mode(mode, topology_live=_topology_live())
     live_reg = _live_registration()
     if live_reg is not None:
         orch.fixtures.registration = live_reg
-    orch.imported_candidate = imported_candidate_for_mode(mode, _candidate_name())
+    imported = imported_candidate_for_mode(mode, _candidate_name())
+    if imported is not None:
+        orch.imported_candidate = imported
+    else:
+        reused = existing if _warm_start_is_valid(existing) else _session_warm_start_candidate()
+        orch.imported_candidate = reused
+        if reused is not None:
+            _run_print("[RUN] reusing existing warm-start candidate; Grok will not regenerate")
     orch.topology_options = _topology_options()
     orch.warm_start_generator = _warm_start_generator()
 
 
-def _continue_design() -> None:
+def _continue_design(*, from_optimize: bool = False) -> None:
     orch: Orchestrator = st.session_state.orch
     mark_ui_transition(st.session_state)
     _sync_orch_fixtures()
     if orch.state.stage == WorkflowStage.REQUIREMENTS and orch.state.requirements is None:
         message = _current_request_text()
         if not message:
+            if from_optimize:
+                _run_print("[RUN] BLOCKED: no design request text")
             st.session_state.ui_notice = "Write a design request first."
             return
         st.session_state.submitted_request = message
@@ -707,8 +1204,18 @@ def _continue_design() -> None:
         update = _answers_to_update()
         _append("user", _format_answers(update))
         orch.apply_answers(update)
-        _append("assistant", _assistant_after_interaction(orch.state))
+        if orch.state.stage == WorkflowStage.REQUEST_INFORMATION:
+            _refresh_clarifications_from_backend(orch)
+            _preserve_supplied_answers(orch.state)
+        if not from_optimize or orch.state.stage == WorkflowStage.REQUEST_INFORMATION:
+            _append("assistant", _assistant_after_interaction(orch.state))
+        if from_optimize:
+            _run_print(
+                f"[RUN] apply_answers -> stage={getattr(orch.state.stage, 'value', orch.state.stage)}"
+            )
     if orch.state.contract_error:
+        if from_optimize:
+            _run_print(f"[RUN] BLOCKED: contract_error {orch.state.contract_error}")
         _append(
             "assistant",
             format_mismatch_message(orch.state),
@@ -721,10 +1228,26 @@ def _continue_design() -> None:
         WorkflowStage.REQUEST_INFORMATION,
         WorkflowStage.DESIGN_REVIEW_FAILED,
     ):
+        if from_optimize:
+            _run_print(
+                f"[RUN] starting orch.run() from stage={getattr(orch.state.stage, 'value', orch.state.stage)}"
+            )
         if _topology_live() or orch.warm_start_generator is not None:
             _run_with_progress(orch)
         else:
             orch.run()
+        if from_optimize:
+            _run_print(
+                f"[RUN] RESULT_STORED stage={getattr(orch.state.stage, 'value', orch.state.stage)} "
+                f"topology={orch.state.topology is not None} "
+                f"geometry={orch.state.geometry is not None}"
+            )
+        if orch.state.stage == WorkflowStage.REQUEST_INFORMATION:
+            _refresh_clarifications_from_backend(orch)
+            _preserve_supplied_answers(orch.state)
+            missing = backend_missing_fields(orch.state, st.session_state.get("answers"))
+            if from_optimize:
+                _run_print(f"[RUN] bounced to request_information missing={missing}")
         if orch.state.contract_error:
             _append(
                 "assistant",
@@ -733,6 +1256,19 @@ def _continue_design() -> None:
             )
         else:
             _append("assistant", _user_result_message(orch.state))
+    else:
+        if from_optimize:
+            _run_print(
+                f"[RUN] BLOCKED: orch.run() skipped because stage="
+                f"{getattr(orch.state.stage, 'value', orch.state.stage)}"
+            )
+    if orch.state.topology is not None or orch.state.geometry is not None or orch.state.structure is not None:
+        _queue_workspace_tab(
+            workspace_tab_after_event(
+                design=orch.state.geometry is not None or orch.state.structure is not None,
+                topology=orch.state.topology is not None,
+            )
+        )
 
 
 def _render_reasoning_traces() -> None:
@@ -800,6 +1336,10 @@ def _run_with_progress(orch: Orchestrator) -> None:
     try:
         with st.spinner("Generating preliminary optimized design…"):
             orch.run()
+    except Exception:
+        _run_print("[RUN] EXCEPTION at _run_with_progress/orch.run")
+        traceback.print_exc()
+        raise
     finally:
         orch.topology_progress = None
         bar.empty()
@@ -818,6 +1358,9 @@ def _format_answers(update: RequirementsUpdate) -> str:
 
 
 def _user_result_message(state: DesignState) -> str:
+    failure = _current_failure()
+    if failure is not None:
+        return failure.headline
     if state.stage == WorkflowStage.REJECTED:
         return _assistant_after_interaction(state)
     if state.stage == WorkflowStage.REQUEST_INFORMATION:
@@ -1377,11 +1920,26 @@ def _render_categorical_field(question: Any, widget_key: str, current_val: Any) 
 
 def _render_clarification_fields(state: DesignState) -> None:
     """Only the backend's current missing fields. No invented measurement list."""
-    if state.stage != WorkflowStage.REQUEST_INFORMATION or not state.clarifications:
+    if state.stage != WorkflowStage.REQUEST_INFORMATION:
+        return
+    questions = list(state.clarifications or [])
+    if not questions:
+        orch = st.session_state.get("orch")
+        if orch is not None:
+            _refresh_clarifications_from_backend(orch)
+            questions = list(orch.state.clarifications or [])
+    if not questions:
         return
     reg_meas = st.session_state.get("registration_meas") or {}
-    for question in state.clarifications:
+    for question in questions:
         field = question.field
+        if (
+            field == "desk_thickness_mm"
+            and reg_meas.get("prefill")
+            and reg_meas.get("desk_thickness_mm") is not None
+        ):
+            st.session_state.answers[field] = float(reg_meas["desk_thickness_mm"])
+            continue
         widget_key = f"ans_{field}"
         current_val = st.session_state.answers.get(field)
         if (
@@ -1436,26 +1994,52 @@ def _render_clarification_fields(state: DesignState) -> None:
 
 
 def _render_scene_inputs() -> None:
-    """Photo slot for the conversation column. Registration path lives in the sidebar."""
+    """Photo slot for the conversation column. Reconstruction details live in the sidebar."""
     uploaded = st.file_uploader(
         "Scene photos",
-        type=["png", "jpg", "jpeg", "webp"],
+        type=["png", "jpg", "jpeg", "webp", "heic"],
         key="scene_photo",
-        accept_multiple_files=False,
+        accept_multiple_files=True,
+        help=SCENE_PHOTO_HELP,
     )
-    if uploaded is not None:
-        st.session_state.image_bytes = uploaded.getvalue()
-        st.session_state.image_name = uploaded.name
-    if st.session_state.get("image_bytes"):
+    files = list(uploaded or [])
+    status = reconstruction_photo_status(len(files), MIN_IMAGES)
+    st.caption(f"{status['count_label']} · {status['min_label']}")
+    if not status["ready"]:
+        st.markdown(status["action"])
+    if files:
+        first = files[0]
+        st.session_state.image_bytes = first.getvalue()
+        st.session_state.image_name = first.name
+        preview = files[:4]
+        cols = st.columns(len(preview))
+        for col, item in zip(cols, preview):
+            with col:
+                st.image(item.getvalue(), use_container_width=True)
+                st.markdown(f"**{html.escape(item.name)}**")
+        if len(files) > 4:
+            st.markdown(f"+{len(files) - 4} more")
+    elif st.session_state.get("image_bytes"):
         name = st.session_state.get("image_name") or "photo"
         thumb, meta = st.columns([1, 3])
         with thumb:
             st.image(st.session_state.image_bytes, use_container_width=True)
         with meta:
             st.markdown(f"**{html.escape(name)}**", unsafe_allow_html=True)
+    if st.button(
+        "Reconstruct scene",
+        use_container_width=True,
+        disabled=not status["ready"],
+    ):
+        st.session_state.pending_registration = True
+        st.rerun()
+    if st.session_state.get("registration_error") and not st.session_state.get("registration_run"):
+        st.error(st.session_state.registration_error)
 
 
 def _phase_is_blocked(state: DesignState) -> bool:
+    if _current_failure() is not None:
+        return True
     if state.contract_error:
         return True
     if state.stage in (
@@ -1555,8 +2139,95 @@ def _render_request_line() -> None:
         st.text_area("Design request", key="request_text", height=90)
 
 
+def _render_focused_constraint(field: str) -> None:
+    from types import SimpleNamespace
+
+    question = SimpleNamespace(field=field, question=FIELD_COPY.get(field, (field.replace("_", " "), None))[0])
+    current = st.session_state.get("answers", {}).get(field)
+    widget_key = f"ans_{field}"
+    st.markdown('<div class="mdc-field-focus">', unsafe_allow_html=True)
+    if field_widget_kind(question) == "numeric":
+        if widget_key not in st.session_state:
+            st.session_state[widget_key] = float(current) if current not in (None, "") else 0.0
+        unit = field_unit(question)
+        cols = st.columns([4, 1]) if unit else [st.container()]
+        with cols[0]:
+            st.number_input(field_display_label(question), key=widget_key)
+        if unit:
+            with cols[1]:
+                st.markdown(f'<div class="mdc-unit">{html.escape(unit)}</div>', unsafe_allow_html=True)
+        st.session_state.setdefault("answers", {})[field] = st.session_state[widget_key]
+    else:
+        if widget_key not in st.session_state:
+            st.session_state[widget_key] = "" if current in (None,) else current
+        st.text_input(field_display_label(question), key=widget_key)
+        st.session_state.setdefault("answers", {})[field] = st.session_state[widget_key]
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_failure_card(card) -> None:
+    st.session_state.failure_log_card = card
+    st.markdown(f'<div class="mdc-action-title">{html.escape(card.headline)}</div>', unsafe_allow_html=True)
+    for item in card.findings:
+        st.markdown(f"• {html.escape(item.what)} {html.escape(item.action)}")
+    focus = st.session_state.get("focus_constraint_field")
+    if focus:
+        _render_focused_constraint(focus)
+    cols = st.columns(3 if card.secondary_label else 2)
+    with cols[0]:
+        if card.primary_label == "Add / replace photos":
+            st.button(
+                card.primary_label,
+                type="primary",
+                use_container_width=True,
+                on_click=mark_ui_transition,
+                args=(st.session_state,),
+            )
+        else:
+            st.button(
+                card.primary_label,
+                type="primary",
+                use_container_width=True,
+                on_click=_retry_same_constraints,
+            )
+    if card.secondary_label:
+        with cols[1]:
+            field = card.constraint_field or "max_protrusion_mm"
+            st.button(
+                card.secondary_label,
+                use_container_width=True,
+                on_click=_focus_constraint_field,
+                args=(field,),
+            )
+    with cols[-1]:
+        if st.button(card.log_label, use_container_width=True):
+            _failure_log_dialog()
+
+
+def _render_grok_product_status() -> None:
+    """Main-column Grok status. API-not-connected is not a validation failure."""
+    if effective_geometry_mode(st.session_state.get("mode_geom")) != GEOM_GENERATED:
+        return
+    message = generator_status_message(
+        get_provider("grok").configured,
+        st.session_state.get("warm_start_result"),
+    )
+    if message == API_NOT_CONNECTED:
+        st.warning(message)
+
+
 def _render_required_action(spec: ActionSpec, state: DesignState) -> None:
     st.markdown(f'<div id="{ACTION_ANCHOR_ID}" class="mdc-action">', unsafe_allow_html=True)
+    failure = _current_failure()
+    if failure is None:
+        _render_grok_product_status()
+    if failure is not None:
+        _render_failure_card(failure)
+        if st.session_state.ui_notice:
+            st.warning(st.session_state.ui_notice)
+            st.session_state.ui_notice = ""
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
     if spec.title:
         st.markdown(f'<div class="mdc-action-title">{html.escape(spec.title)}</div>', unsafe_allow_html=True)
     if spec.subtitle and spec.kind in ("revise", "download", "none"):
@@ -1586,6 +2257,7 @@ def _render_left_column(spec: ActionSpec, state: DesignState) -> None:
                 unsafe_allow_html=True,
             )
         st.text_area("Design request", key="request_text", height=110)
+        _render_grok_product_status()
         _render_scene_inputs()
         if st.session_state.ui_notice:
             st.warning(st.session_state.ui_notice)
@@ -1619,29 +2291,180 @@ def _current_candidate(state: DesignState):
     )
 
 
-def _render_right_column(spec: ActionSpec, state: DesignState) -> None:
-    """Engineering output only. Placeholders until real artifacts exist."""
+_SCENE_GLB_FILES = (
+    ("hybrid_mesh_viewer", "target_mesh_hybrid.glb"),
+    ("viewer", "target.glb"),
+)
+_SCENE_VIEW_FILES = (
+    ("top_view", "debug/world_top.png"),
+    ("side_view", "debug/world_side.png"),
+)
+_GLB_VIEWER_MAX_BYTES = 18_000_000
+_SCENE_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
+
+
+def _ok_registration_run():
+    run = st.session_state.get("registration_run")
+    if run is not None and getattr(run, "ok", False):
+        return run
+    return None
+
+
+def _existing_file(raw: Any) -> Optional[Path]:
+    if not raw:
+        return None
+    path = Path(raw)
+    if path.is_file() and path.stat().st_size > 0:
+        return path
+    return None
+
+
+def _artifact_file(run, *keys: str) -> Optional[Path]:
+    artifacts = getattr(run, "artifacts", None) or {}
+    for key in keys:
+        found = _existing_file(artifacts.get(key))
+        if found is not None:
+            return found
+    return None
+
+
+def _reconstruction_file(run, key: str, relative: str) -> Optional[Path]:
+    found = _artifact_file(run, key)
+    if found is not None:
+        return found
+    out_dir = getattr(run, "out_dir", "") or ""
+    if out_dir:
+        return _existing_file(Path(out_dir) / relative)
+    return None
+
+
+def reconstruction_visuals(run) -> Dict[str, Any]:
+    """Real surfcap visuals only. Uploaded photos are not reconstruction."""
+    if run is None or not getattr(run, "ok", False):
+        return {"glb": None, "views": [], "reconstructed": False}
+    glb = None
+    for key, relative in _SCENE_GLB_FILES:
+        glb = _reconstruction_file(run, key, relative)
+        if glb is not None:
+            break
+    views = [
+        path
+        for key, relative in _SCENE_VIEW_FILES
+        if (path := _reconstruction_file(run, key, relative)) is not None
+    ]
+    return {"glb": glb, "views": views, "reconstructed": glb is not None or bool(views)}
+
+
+def _processed_photo_count(run) -> int:
+    uploads = st.session_state.get("scene_photo") or st.session_state.get("reg_capture_photos") or []
+    if uploads:
+        return len(list(uploads))
+    capture = getattr(run, "capture_dir", "") or ""
+    folder = Path(capture) if capture else None
+    if folder is not None and folder.is_dir():
+        return sum(1 for path in folder.iterdir() if path.suffix.lower() in _SCENE_IMAGE_SUFFIXES)
+    if st.session_state.get("image_bytes"):
+        return 1
+    return 0
+
+
+def _render_glb_viewer(path: Path) -> bool:
+    data = path.read_bytes()
+    if not data or len(data) > _GLB_VIEWER_MAX_BYTES:
+        return False
+    payload = base64.b64encode(data).decode("ascii")
+    components.html(
+        f"""
+        <script type="module" src="https://unpkg.com/@google/model-viewer@4.0.0/dist/model-viewer.min.js"></script>
+        <model-viewer
+          src="data:model/gltf-binary;base64,{payload}"
+          camera-controls
+          touch-action="pan-y"
+          shadow-intensity="0.35"
+          exposure="1"
+          style="width:100%;height:640px;background:#111827;border-radius:12px;">
+        </model-viewer>
+        """,
+        height=650,
+    )
+    return True
+
+
+def _scene_status_line(text: str) -> None:
+    st.markdown(
+        f'<div class="mdc-scene-status">{html.escape(text)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_uploaded_photos(label: str) -> bool:
+    uploads = list(st.session_state.get("scene_photo") or [])
+    if uploads:
+        st.caption(label)
+        preview = uploads[:4]
+        cols = st.columns(len(preview))
+        for col, item in zip(cols, preview):
+            with col:
+                data = item.getvalue() if hasattr(item, "getvalue") else item
+                st.image(data, use_container_width=True)
+                st.caption(label)
+        return True
+    if st.session_state.get("image_bytes"):
+        st.caption(label)
+        st.image(st.session_state.image_bytes, use_container_width=True)
+        return True
+    return False
+
+
+def _render_scene_failure(card) -> None:
+    st.markdown(
+        f'<div class="mdc-action-title">{html.escape(card.headline)}</div>',
+        unsafe_allow_html=True,
+    )
+    for item in card.findings:
+        st.markdown(f"• {html.escape(item.what)} {html.escape(item.action)}")
+
+
+def _render_scene_workspace() -> None:
+    run = st.session_state.get("registration_run")
+    visuals = reconstruction_visuals(_ok_registration_run())
+    photo_count = _processed_photo_count(run)
+    failure = _current_failure()
+    reconstruction_failed = (
+        failure is not None and getattr(failure, "stage", None) == STAGE_RECONSTRUCTION
+    )
+
+    if visuals["reconstructed"]:
+        shown = False
+        if visuals["glb"] is not None:
+            shown = _render_glb_viewer(visuals["glb"])
+        if not shown and visuals["views"]:
+            cols = st.columns(len(visuals["views"]))
+            for col, path in zip(cols, visuals["views"]):
+                col.image(str(path), use_container_width=True)
+            shown = True
+        _scene_status_line(reconstructed_scene_status(reconstructed=True, photo_count=photo_count))
+        return
+
+    if reconstruction_failed:
+        _render_scene_failure(failure)
+        _render_uploaded_photos("Source photo")
+        return
+
+    status = reconstructed_scene_status(reconstructed=False, photo_count=photo_count)
+    if _render_uploaded_photos("Photo preview"):
+        _scene_status_line(status)
+        return
+    _placeholder(status)
+
+
+def _render_design_workspace(state: DesignState) -> None:
     candidate = _current_candidate(state)
-    has_photo = bool(st.session_state.get("image_bytes"))
-    has_reg = bool(st.session_state.get("registration_meas"))
     has_geom = state.geometry is not None
     has_struct = state.structure is not None
-    has_topo = state.topology is not None
-
-    st.markdown("**Scene**")
-    if has_photo:
-        st.image(
-            st.session_state.image_bytes,
-            caption=st.session_state.image_name,
-            use_container_width=True,
-        )
-    elif has_reg:
-        _placeholder("Registration attached")
-    else:
-        _placeholder("Waiting for input")
-
-    st.markdown("**Design**")
+    shown = False
     if candidate is not None:
+        shown = True
         st.caption(
             CANDIDATES[candidate.candidate_name].label
             if candidate.candidate_name in CANDIDATES
@@ -1673,22 +2496,18 @@ def _render_right_column(spec: ActionSpec, state: DesignState) -> None:
                         "script": ws.get("script_path"),
                     }
                 )
-    elif has_geom and has_struct is False:
+    elif has_geom and not has_struct:
+        shown = True
         st.plotly_chart(geometry_figure(state.geometry), use_container_width=True)
     elif st.session_state.get("warm_start_result") and not st.session_state["warm_start_result"].get("ok"):
-        ws = st.session_state["warm_start_result"]
-        st.error(
-            f"Warm-start generation failed after {ws.get('attempts')} attempt(s): "
-            f"{ws.get('error') or ws.get('problems')}"
-        )
-    else:
-        _placeholder("Design will appear here")
-
-    st.markdown("**Engineering**")
+        shown = True
+        st.caption(GENERATION_FAILED_VALIDATION)
     if has_struct:
+        shown = True
+        if st.session_state.get("warm_start_result") and not st.session_state["warm_start_result"].get("ok"):
+            st.caption("Concept generated")
         st.plotly_chart(structure_figure(state.structure, state.geometry), use_container_width=True)
         s = state.structure
-        load = s.load_cases[0] if s.load_cases else None
         st.caption(
             f"iteration {s.iteration} · thickness {s.parameters.support_thickness_mm:g} mm · "
             f"braces {s.parameters.brace_count} · {len(s.nodes)} nodes · {len(s.members)} members"
@@ -1706,54 +2525,49 @@ def _render_right_column(spec: ActionSpec, state: DesignState) -> None:
                 f"Review {last['review']} · displacement {last['max_displacement_mm']:.2f} mm · "
                 f"stress {last['max_stress_mpa']:.2f} MPa"
             )
-    elif spec.kind == "optimize" or spec.phase == "Design":
-        _placeholder("Waiting for input")
-    else:
+    if not shown:
         _placeholder("Waiting for input")
 
-    st.markdown("**Topology optimization**")
-    if has_topo:
-        t = state.topology
-        accept = t.acceptance or {}
-        preview = accept.get("acceptance_status") == "unresolved_not_converged" or t.converged is False
-        if preview:
-            st.caption("Not converged — preview only.")
-        if t.is_mock:
-            st.caption("Preview only.")
-        else:
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Compliance", f"{t.compliance:.3g}")
-            m2.metric("Volume fraction", f"{t.volume_fraction:.2f}")
-            m3.metric("Mass vs warm start", f"{-t.mass_reduction_pct:+.0f}%")
-            m4.metric("Wall time", f"{t.wall_time_s or 0:.0f} s")
-        mesh_path = Path(t.optimized_geometry_ref)
-        if mesh_path.suffix.lower() in {".stl", ".obj"} and mesh_path.exists():
-            st.plotly_chart(
-                optimized_design_figure(t.artifacts.get("candidate_mesh"), str(mesh_path)),
-                use_container_width=True,
-            )
-            img_cols = st.columns(2)
-            for col, key, caption in (
-                (img_cols[0], "history_png", "Convergence history"),
-                (img_cols[1], "render_png", "Density isosurface"),
-            ):
-                img = t.artifacts.get(key)
-                if img and Path(img).exists():
-                    col.image(img, caption=caption, use_container_width=True)
-        if t.post_check is not None:
-            pc = t.post_check
-            fos = f"{pc.factor_of_safety:.2f}" if pc.factor_of_safety is not None else "n/a"
-            st.caption(
-                f"Post-TO check: displacement {pc.max_displacement_mm:.3f} mm · "
-                f"von Mises {pc.max_stress_pa / 1e6:.2f} MPa · FoS {fos}"
-            )
-    else:
-        _placeholder("Design will appear here")
 
-    st.markdown("**Verification**")
-    if state.verification is not None or has_topo:
-        t = state.topology
-        accept = (t.acceptance or {}) if t is not None else {}
+def _render_optimization_workspace(state: DesignState) -> None:
+    if state.topology is None:
+        _placeholder("Waiting for input")
+        return
+    t = state.topology
+    accept = t.acceptance or {}
+    preview = accept.get("acceptance_status") == "unresolved_not_converged" or t.converged is False
+    if preview:
+        st.caption("Not converged — preview only.")
+    if t.is_mock:
+        st.caption("Preview only.")
+    else:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Compliance", f"{t.compliance:.3g}")
+        m2.metric("Volume fraction", f"{t.volume_fraction:.2f}")
+        m3.metric("Mass vs warm start", f"{-t.mass_reduction_pct:+.0f}%")
+        m4.metric("Wall time", f"{t.wall_time_s or 0:.0f} s")
+    mesh_path = Path(t.optimized_geometry_ref)
+    if mesh_path.suffix.lower() in {".stl", ".obj"} and mesh_path.exists():
+        st.plotly_chart(
+            optimized_design_figure(t.artifacts.get("candidate_mesh"), str(mesh_path)),
+            use_container_width=True,
+        )
+        img_cols = st.columns(2)
+        for col, key, caption in (
+            (img_cols[0], "history_png", "Convergence history"),
+            (img_cols[1], "render_png", "Density isosurface"),
+        ):
+            img = t.artifacts.get(key)
+            if img and Path(img).exists():
+                col.image(img, caption=caption, use_container_width=True)
+    if t.post_check is not None:
+        pc = t.post_check
+        fos = f"{pc.factor_of_safety:.2f}" if pc.factor_of_safety is not None else "n/a"
+        st.caption(
+            f"Post-TO check: displacement {pc.max_displacement_mm:.3f} mm · "
+            f"von Mises {pc.max_stress_pa / 1e6:.2f} MPa · FoS {fos}"
+        )
+    if state.verification is not None:
         env = accept.get("within_envelope")
         st.write(
             {
@@ -1776,17 +2590,28 @@ def _render_right_column(spec: ActionSpec, state: DesignState) -> None:
         )
         if engineering_evidence_is_mocked(state):
             st.caption("Physical safety unverified — mock engineering evidence is present.")
-    else:
-        _placeholder("Waiting for input")
-
     if state.cad is not None:
-        cad = state.cad
-        st.markdown("**Export**")
-        cad_path = Path(cad.filename)
+        cad_path = Path(state.cad.filename)
         if cad_path.suffix.lower() in {".stl", ".obj"} and cad_path.exists():
-            st.success(f"STL ready: {cad_path.name}")
-        elif cad.is_mock:
-            st.caption("Export is a mock placeholder.")
+            st.caption(cad_path.name)
+
+
+def _render_right_column(state: DesignState) -> None:
+    """Primary visual workspace: reconstructed scene, then design, then optimization."""
+    tab = st.segmented_control(
+        "Workspace",
+        WORKSPACE_TABS,
+        key="workspace_tab",
+        required=True,
+        label_visibility="collapsed",
+        width="stretch",
+    ) or st.session_state.get("workspace_tab") or WORKSPACE_TAB_SCENE
+    if tab == WORKSPACE_TAB_SCENE:
+        _render_scene_workspace()
+    elif tab == WORKSPACE_TAB_OPTIMIZATION:
+        _render_optimization_workspace(state)
+    else:
+        _render_design_workspace(state)
 
 
 def _cursor_compare_column(title: str, result) -> None:
@@ -1808,6 +2633,58 @@ def _cursor_compare_column(title: str, result) -> None:
     st.write("inferred fields:", observation.inferred_values or {})
     st.write("payload:", observation.detected_payload_type)
     st.write("support:", observation.detected_support_type)
+
+
+def _render_registration_debug() -> None:
+    """Surfcap controls and evidence. Developer sidebar only."""
+    with st.expander("Reconstruct grounding surface", expanded=False):
+        for step in CAPTURE_GUIDANCE:
+            st.write(f"- {step}")
+        st.button(
+            "Run bundled table_a capture",
+            use_container_width=True,
+            on_click=_load_table_a_registration,
+        )
+        st.file_uploader(
+            "Capture photos",
+            type=["jpg", "jpeg", "png", "heic"],
+            accept_multiple_files=True,
+            key="reg_capture_photos",
+        )
+        st.text_input(
+            "Or use a local capture folder",
+            key="reg_capture_folder",
+            placeholder="/path/to/photos",
+        )
+        st.text_input("Surface prompt", key="reg_table_prompt", value="table")
+        if st.button("Run grounding-surface reconstruction", use_container_width=True):
+            st.session_state.pending_registration = True
+            st.rerun()
+        if st.session_state.registration_error:
+            st.error(st.session_state.registration_error)
+        run = st.session_state.registration_run
+        if run is not None and getattr(run, "ok", False):
+            meas = getattr(run, "measurements", None) or {}
+            st.write(
+                {
+                    "confidence": meas.get("confidence"),
+                    "thickness (mm)": meas.get("desk_thickness_mm"),
+                    "thickness provenance": meas.get("thickness_provenance"),
+                    "mount extent (mm)": meas.get("mount_extent_mm"),
+                    "hybrid mesh extent (mm)": meas.get("mesh_extent_mm"),
+                    "hybrid mesh watertight": meas.get("mesh_watertight"),
+                    "hybrid mesh faces": meas.get("mesh_faces"),
+                    "elapsed_s": getattr(run, "elapsed_s", None),
+                }
+            )
+            warnings = getattr(run, "warnings", None) or []
+            if warnings:
+                with st.expander("Registration warnings"):
+                    for warning in warnings:
+                        st.write(f"- {warning}")
+            if getattr(run, "log", ""):
+                with st.expander("Surfcap log"):
+                    st.code(run.log, language="text")
 
 
 def _render_developer_controls(*, include_registration_input: bool = True) -> None:
@@ -1835,6 +2712,7 @@ def _render_developer_controls(*, include_registration_input: bool = True) -> No
         help="Developer-only. Off by default. When off, topology stays Live and mock "
              "execution is not presented as a product result.",
     )
+    _render_registration_debug()
     if not _mock_fixtures_enabled():
         st.session_state.mode_topo = "Live"
     if include_registration_input:
@@ -1895,7 +2773,7 @@ def _render_developer_controls(*, include_registration_input: bool = True) -> No
         if _grok.configured:
             st.caption(f"Generator model: {_grok.model} (writes a trimesh script; up to 3 validation retries).")
         else:
-            st.warning(_grok.not_connected_reason)
+            st.warning(f"{API_NOT_CONNECTED}. {_grok.not_connected_reason}")
     else:
         st.caption(geometry_provenance_text(GEOM_ADAPTIVE))
     st.radio("Analysis", ["Mock Fixture", "Live"], index=0, disabled=True, key="mode_analysis")
@@ -2080,7 +2958,7 @@ def _render_developer_controls(*, include_registration_input: bool = True) -> No
 
 
 st.set_page_config(
-    page_title="On TOP of the World",
+    page_title=BRAND_TITLE,
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -2089,6 +2967,10 @@ _apply_pending_prefills()
 if st.session_state.pop("pending_analyze", False):
     with st.spinner("Analyzing image and requirements with Cursor..."):
         _analyze_image_and_requirements()
+if st.session_state.pop("pending_registration", False):
+    with st.spinner("Reconstructing scene…"):
+        _run_grounding_surface_registration()
+    _apply_pending_prefills()
 
 st.markdown(
     """
@@ -2183,6 +3065,11 @@ st.markdown(
       color:#6b7280;background:#f9fafb;border:1px dashed #d1d5db;
       border-radius:10px;padding:14px 12px;margin:0 0 16px 0;
     }
+    .mdc-scene-status {color:#6b7280;font-size:0.85rem;margin:8px 0 0 0;}
+    .mdc-field-focus {
+      border:1px solid #2563eb;box-shadow:0 0 0 3px rgba(37,99,235,0.15);
+      border-radius:10px;padding:8px 10px;margin:8px 0 12px 0;
+    }
     @media (max-width: 900px) {
       div[data-testid="stHorizontalBlock"] {flex-direction:column !important;}
     }
@@ -2195,7 +3082,7 @@ orch: Orchestrator = st.session_state.orch
 state = orch.state
 status = pipeline_status(state)
 current = highlighted_stage(state)
-spec = action_spec(state, st.session_state.get("answers"))
+spec = action_spec(state, st.session_state.get("answers"), failure=_current_failure())
 
 with st.sidebar:
     _render_developer_controls(include_registration_input=True)
@@ -2243,11 +3130,11 @@ with st.sidebar:
     _render_reasoning_traces()
 
 st.markdown(
-    """
+    f"""
     <div class="mdc-brand">
-      <div class="mdc-brand-title">On TOP of the World</div>
-      <div class="mdc-brand-tagline">Snap it. TOPtimize it. Print it.</div>
-      <div class="mdc-brand-sub">Take a photo. Get a lightweight custom part designed to fit your space, powered by TOPology optimization.</div>
+      <div class="mdc-brand-title">{html.escape(BRAND_TITLE)}</div>
+      <div class="mdc-brand-tagline">{html.escape(BRAND_TAGLINE)}</div>
+      <div class="mdc-brand-sub">{html.escape(BRAND_SUB)}</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -2258,7 +3145,7 @@ left, right = st.columns([0.9, 1.25], gap="large")
 with left:
     _render_left_column(spec, state)
 with right:
-    _render_right_column(spec, state)
+    _render_right_column(state)
 
 if consume_scroll_to_action(st.session_state):
     components.html(

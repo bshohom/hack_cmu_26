@@ -1,0 +1,28 @@
+# data/table_a/notes.txt — ground-truth measurements (fill in the <...> fields; mm unless stated)
+# Used only by humans to check the pipeline's scale/planes. Not read by the code.
+
+table_description: <e.g. small dark-brown rolling table, metal legs, ~60x40 cm top>
+capture_date: 2026-09-11
+phone: <e.g. iPhone 16 Pro, main 1x lens>
+n_photos: 11
+
+# Reference object (lying flat on the table top)
+reference_object: Costco membership card
+card_long_edge_mm: About 86mm
+card_short_edge_mm: About 56
+card_thickness_mm: 1mm approx
+
+# Table geometry
+top_length_mm: About 600 mm
+top_width_mm: About 350 mm
+top_thickness_mm: Betweem 15-20 mm
+table_height_mm: <About 750 mm
+
+# Card placement (for checking the world frame origin/axes)
+card_long_edge_to_nearest_table_edge_mm: About 13 mm
+card_short_edge_to_nearest_table_edge_mm: About 195 mm
+card_long_edge_parallel_to: "table long side" 
+which_table_edge_is_nearest_the_card: "front edge (the one facing the room)"
+
+# Anything else useful
+notes: <glossy top? clutter? which edge is the "front"? lighting?>

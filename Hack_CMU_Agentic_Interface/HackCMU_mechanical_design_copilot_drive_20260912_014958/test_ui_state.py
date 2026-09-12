@@ -4,17 +4,24 @@ from __future__ import annotations
 
 import io
 import unittest
+from types import SimpleNamespace
 
 from app import (
     HAPPY_PATH_MESSAGE,
     MISSING_INFO_MESSAGE,
     REJECTED_MESSAGE,
+    apply_pending_registration_path,
     apply_pending_request_prefill,
+    apply_pending_workspace_tab,
+    apply_trusted_registration_answers,
     consume_scroll_to_action,
     field_display_label,
     field_widget_kind,
     mark_ui_transition,
+    reconstruction_visuals,
+    sync_answer_widgets,
 )
+from ui_flow import WORKSPACE_TAB_OPTIMIZATION, WORKSPACE_TAB_SCENE
 
 
 class FieldWidgetTests(unittest.TestCase):
@@ -71,6 +78,77 @@ class PendingPrefillTests(unittest.TestCase):
         mark_ui_transition(store)
         self.assertTrue(consume_scroll_to_action(store))
         self.assertFalse(consume_scroll_to_action(store))
+
+    def test_completed_registration_path_moves_before_widget_construction(self) -> None:
+        store = {
+            "reg_target_path": "old.json",
+            "pending_reg_target_path": "/tmp/new/target.json",
+        }
+        apply_pending_registration_path(store)
+        self.assertEqual(store["reg_target_path"], "/tmp/new/target.json")
+        self.assertIsNone(store["pending_reg_target_path"])
+
+    def test_current_widget_values_win_when_continue_is_clicked(self) -> None:
+        store = {
+            "answers": {"desk_thickness_mm": 20.0},
+            "ans_desk_thickness_mm": 17.32,
+            "no_drill": True,
+        }
+        sync_answer_widgets(store)
+        self.assertEqual(store["answers"]["desk_thickness_mm"], 17.32)
+        self.assertEqual(
+            store["answers"]["attachment_notes"], "clamp only, no drilling"
+        )
+
+    def test_sync_maps_pill_labels_to_stored_values(self) -> None:
+        store = {
+            "answers": {},
+            "ans_attachment_method": "Clamp",
+            "ans_allowed_contact_region": "Front edge",
+            "ans_manufacturing_method": "3D print",
+        }
+        sync_answer_widgets(store)
+        self.assertEqual(store["answers"]["attachment_method"], "clamp")
+        self.assertEqual(store["answers"]["allowed_contact_region"], "desk_front_edge")
+        self.assertEqual(store["answers"]["manufacturing_method"], "3d_print")
+
+    def test_sync_does_not_wipe_answers_when_pills_are_empty(self) -> None:
+        store = {
+            "answers": {
+                "attachment_method": "clamp",
+                "allowed_contact_region": "desk_front_edge",
+            },
+            "ans_attachment_method": None,
+            "ans_allowed_contact_region": None,
+        }
+        sync_answer_widgets(store)
+        self.assertEqual(store["answers"]["attachment_method"], "clamp")
+        self.assertEqual(store["answers"]["allowed_contact_region"], "desk_front_edge")
+
+    def test_trusted_registration_prefills_empty_thickness(self) -> None:
+        store = {
+            "answers": {},
+            "registration_meas": {"prefill": True, "desk_thickness_mm": 17.32},
+        }
+        apply_trusted_registration_answers(store)
+        self.assertEqual(store["answers"]["desk_thickness_mm"], 17.32)
+
+    def test_pending_workspace_tab_moves_before_widget_construction(self) -> None:
+        store = {
+            "workspace_tab": WORKSPACE_TAB_SCENE,
+            "pending_workspace_tab": WORKSPACE_TAB_OPTIMIZATION,
+        }
+        apply_pending_workspace_tab(store)
+        self.assertEqual(store["workspace_tab"], WORKSPACE_TAB_OPTIMIZATION)
+        self.assertIsNone(store["pending_workspace_tab"])
+
+    def test_trusted_registration_does_not_overwrite_user_thickness(self) -> None:
+        store = {
+            "answers": {"desk_thickness_mm": 20.0},
+            "registration_meas": {"prefill": True, "desk_thickness_mm": 17.32},
+        }
+        apply_trusted_registration_answers(store)
+        self.assertEqual(store["answers"]["desk_thickness_mm"], 20.0)
 
 
 class StreamlitWidgetOwnershipTests(unittest.TestCase):
@@ -241,6 +319,106 @@ class StreamlitWidgetOwnershipTests(unittest.TestCase):
         self.assertNotIn("Topology", [w.label for w in at.radio])
         self.assertTrue(any(b.label == "Load example" for b in at.sidebar.button))
 
+    def test_right_workspace_defaults_to_scene_not_engineering(self) -> None:
+        at = self._app()
+        self.assertEqual(at.session_state.workspace_tab, WORKSPACE_TAB_SCENE)
+        values = [str(getattr(block, "value", "")) for block in at.markdown]
+        self.assertTrue(
+            any(
+                "Scene not reconstructed yet" in value or "Add 8 more photos to reconstruct" in value
+                for value in values
+            ),
+            values,
+        )
+        self.assertFalse(any("Scene reconstructed" in value for value in values))
+        self.assertFalse(any("**Engineering**" in value for value in values))
+        self.assertFalse(any("Structural concept" in value for value in values))
+
+    def test_ok_run_without_artifacts_is_not_reconstructed(self) -> None:
+        from types import SimpleNamespace
+
+        at = self._app()
+        at.session_state.registration_run = SimpleNamespace(
+            ok=True,
+            artifacts={},
+            capture_dir="",
+            measurements={},
+        )
+        at.session_state.pending_workspace_tab = WORKSPACE_TAB_SCENE
+        at.run()
+        self.assertFalse(at.exception, msg=at.exception)
+        self.assertEqual(at.session_state.workspace_tab, WORKSPACE_TAB_SCENE)
+        page = " ".join(str(getattr(block, "value", "")) for block in at.markdown)
+        captions = " ".join(str(getattr(block, "value", "")) for block in at.caption)
+        blob = f"{page} {captions}"
+        self.assertNotIn("Scene reconstructed", blob)
+        self.assertTrue(
+            "Scene not reconstructed yet" in blob or "more photos to reconstruct" in blob,
+            blob,
+        )
+        self.assertNotIn("Structural concept", page)
+
+    def _png_bytes(self) -> bytes:
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8), color=(200, 180, 150)).save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_uploaded_photo_is_preview_not_reconstruction(self) -> None:
+        at = self._app()
+        at.session_state.image_bytes = self._png_bytes()
+        at.session_state.image_name = "desk.png"
+        at.session_state.pending_workspace_tab = WORKSPACE_TAB_SCENE
+        at.run()
+        self.assertFalse(at.exception, msg=at.exception)
+        captions = " ".join(str(getattr(block, "value", "")) for block in at.caption)
+        page = " ".join(str(getattr(block, "value", "")) for block in at.markdown)
+        blob = f"{page} {captions}"
+        self.assertIn("Photo preview", blob)
+        self.assertNotIn("Scene reconstructed", blob)
+        self.assertIn("Add 7 more photos to reconstruct", blob)
+
+    def test_reconstruction_failure_uses_failure_ux_not_photo(self) -> None:
+        at = self._app()
+        at.session_state.image_bytes = self._png_bytes()
+        at.session_state.image_name = "desk.png"
+        at.session_state.registration_error = "SAM failed"
+        at.session_state.registration_run = None
+        at.session_state.pending_workspace_tab = WORKSPACE_TAB_SCENE
+        at.run()
+        self.assertFalse(at.exception, msg=at.exception)
+        page = " ".join(str(getattr(block, "value", "")) for block in at.markdown)
+        captions = " ".join(str(getattr(block, "value", "")) for block in at.caption)
+        blob = f"{page} {captions}".lower()
+        self.assertIn("reconstruct the scene", blob)
+        self.assertIn("source photo", blob)
+        self.assertNotIn("scene reconstructed", blob)
+        self.assertNotIn("photo preview", blob)
+
+    def test_real_artifact_claims_reconstructed(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        at = self._app()
+        with tempfile.TemporaryDirectory() as tmp:
+            glb = Path(tmp) / "target_mesh_hybrid.glb"
+            glb.write_bytes(b"glb")
+            at.session_state.registration_run = SimpleNamespace(
+                ok=True,
+                artifacts={"hybrid_mesh_viewer": str(glb)},
+                capture_dir="",
+                out_dir=tmp,
+                measurements={},
+            )
+            at.session_state.pending_workspace_tab = WORKSPACE_TAB_SCENE
+            at.run()
+            self.assertFalse(at.exception, msg=at.exception)
+            page = " ".join(str(getattr(block, "value", "")) for block in at.markdown)
+            self.assertIn("Scene reconstructed", page)
+            self.assertNotIn("Scene not reconstructed yet", page)
+
     def test_desk_hook_example_keeps_live_topology(self) -> None:
         from geometry_sources import GEOM_IMPORTED
 
@@ -270,6 +448,48 @@ class StreamlitWidgetOwnershipTests(unittest.TestCase):
         at.radio(key="mode_geom").set_value(GEOM_GOLDEN).run()
         self._click(at, "Reset session")
         self.assertEqual(at.session_state.mode_geom, _default_geometry_mode())
+
+
+class ReconstructionVisualTests(unittest.TestCase):
+    def test_photos_and_empty_ok_run_are_not_reconstruction(self) -> None:
+        self.assertFalse(reconstruction_visuals(None)["reconstructed"])
+        self.assertFalse(
+            reconstruction_visuals(SimpleNamespace(ok=False, artifacts={}, out_dir=""))["reconstructed"]
+        )
+        self.assertFalse(
+            reconstruction_visuals(SimpleNamespace(ok=True, artifacts={}, out_dir=""))["reconstructed"]
+        )
+
+    def test_hybrid_glb_counts_as_reconstruction(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            glb = Path(tmp) / "target_mesh_hybrid.glb"
+            glb.write_bytes(b"glb")
+            visuals = reconstruction_visuals(
+                SimpleNamespace(ok=True, artifacts={"hybrid_mesh_viewer": str(glb)}, out_dir=tmp)
+            )
+            self.assertTrue(visuals["reconstructed"])
+            self.assertEqual(visuals["glb"], glb)
+
+    def test_target_glb_and_views_count(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            glb = Path(tmp) / "target.glb"
+            top = Path(tmp) / "debug"
+            top.mkdir()
+            view = top / "world_top.png"
+            glb.write_bytes(b"glb")
+            view.write_bytes(b"png")
+            visuals = reconstruction_visuals(
+                SimpleNamespace(ok=True, artifacts={"viewer": str(glb), "top_view": str(view)}, out_dir=tmp)
+            )
+            self.assertTrue(visuals["reconstructed"])
+            self.assertEqual(visuals["glb"], glb)
+            self.assertEqual(visuals["views"], [view])
 
 
 if __name__ == "__main__":

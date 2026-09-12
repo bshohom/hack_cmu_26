@@ -6,7 +6,18 @@ import unittest
 from types import SimpleNamespace
 
 from schemas import WorkflowStage
-from ui_flow import action_spec, answers_look_complete, need_details_title, stepper_states, ui_phase
+from ui_flow import (
+    WORKSPACE_TAB_DESIGN,
+    WORKSPACE_TAB_OPTIMIZATION,
+    WORKSPACE_TAB_SCENE,
+    action_spec,
+    answers_look_complete,
+    need_details_title,
+    reconstructed_scene_status,
+    stepper_states,
+    ui_phase,
+    workspace_tab_after_event,
+)
 
 
 def _state(**over):
@@ -107,6 +118,23 @@ class UiPhaseTests(unittest.TestCase):
         self.assertEqual(need_details_title(0), "Ready to optimize")
         self.assertEqual(need_details_title(1), "Need 1 more detail")
         self.assertEqual(need_details_title(2), "Need 2 more details")
+
+    def test_workspace_tab_follows_newest_result(self) -> None:
+        self.assertEqual(workspace_tab_after_event(reconstruction=True), WORKSPACE_TAB_SCENE)
+        self.assertEqual(workspace_tab_after_event(design=True), WORKSPACE_TAB_DESIGN)
+        self.assertEqual(
+            workspace_tab_after_event(reconstruction=True, design=True, topology=True),
+            WORKSPACE_TAB_OPTIMIZATION,
+        )
+
+    def test_reconstructed_scene_status_is_short(self) -> None:
+        self.assertEqual(reconstructed_scene_status(reconstructed=True), "Scene reconstructed")
+        self.assertEqual(reconstructed_scene_status(reconstructed=True, photo_count=8), "Scene reconstructed")
+        self.assertEqual(reconstructed_scene_status(), "Add 8 more photos to reconstruct")
+        self.assertEqual(reconstructed_scene_status(photo_count=2), "Add 6 more photos to reconstruct")
+        self.assertEqual(reconstructed_scene_status(photo_count=7), "Add 1 more photo to reconstruct")
+        self.assertEqual(reconstructed_scene_status(photo_count=8), "Scene not reconstructed yet")
+        self.assertNotEqual(reconstructed_scene_status(photo_count=14), "Scene reconstructed")
 
 
 if __name__ == "__main__":

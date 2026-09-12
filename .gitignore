@@ -7,5 +7,6 @@ out/
 .env
 .streamlit/secrets.toml
 .aider*
-# Aman's CV pipeline is its own git repository
+.wiki/
+# Optional leftover sibling checkout; registration now lives in surfcap/
 HackCMU/

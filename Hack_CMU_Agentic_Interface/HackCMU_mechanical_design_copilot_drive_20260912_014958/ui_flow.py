@@ -12,6 +12,10 @@ from schemas import WorkflowStage
 from state import DesignState
 
 UI_PHASES = ("Describe", "Capture", "Design", "Verify", "Export")
+WORKSPACE_TAB_SCENE = "Reconstructed Scene"
+WORKSPACE_TAB_DESIGN = "Design"
+WORKSPACE_TAB_OPTIMIZATION = "Optimization"
+WORKSPACE_TABS = (WORKSPACE_TAB_SCENE, WORKSPACE_TAB_DESIGN, WORKSPACE_TAB_OPTIMIZATION)
 
 # Clarification fields a future reconstruction pass would typically fill.
 # Used only to pick the highlighted phase; questions still come from the backend.
@@ -32,7 +36,7 @@ class ActionSpec:
     title: str
     subtitle: str
     button: Optional[str]
-    kind: str  # start | continue | optimize | download | none
+    kind: str  # start | continue | optimize | download | none | retry | fail
     result_status: Optional[str] = None  # preliminary | preview | unverified | ready
 
 
@@ -55,12 +59,63 @@ def _field_is_empty(field: str, value: Any) -> bool:
     return False
 
 
+def _update_from_answers(answers: Optional[Dict[str, Any]]):
+    """Pending widget answers as a RequirementsUpdate. Unknown keys are ignored."""
+    from schemas import RequirementsUpdate
+
+    payload: Dict[str, Any] = {}
+    for field, value in (answers or {}).items():
+        if value in (None, ""):
+            continue
+        if field.endswith("_mm") or field.endswith("_kg"):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if number in _NUMERIC_EMPTY:
+                continue
+            payload[field] = number
+        else:
+            payload[field] = value
+    if not payload:
+        return None
+    try:
+        return RequirementsUpdate.model_validate(payload)
+    except Exception:  # noqa: BLE001 — preview only; never block the UI
+        return None
+
+
+def backend_missing_fields(state: DesignState, answers: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Same missing-field list GeometryAgent gating uses: InteractionAgent._missing.
+
+    Pending widget answers are preview-applied onto a copy of the contract so the
+    UI cannot say Ready unless apply_answers would advance to geometry.
+    """
+    answers = answers or {}
+    req = getattr(state, "requirements", None)
+    from schemas import UserRequirements
+
+    if isinstance(req, UserRequirements):
+        from agents.interaction import InteractionAgent
+
+        agent = InteractionAgent()
+        preview = req.model_copy(deep=True)
+        update = _update_from_answers(answers)
+        if update is not None:
+            agent.apply_update(preview, update)
+        return [spec["field"] for spec in agent._missing(preview)]
+
+    fields = clarification_fields(state)
+    if fields:
+        return [field for field in fields if _field_is_empty(field, answers.get(field))]
+    if req is None:
+        return ["user_request"]
+    return []
+
+
 def missing_detail_count(state: DesignState, answers: Optional[Dict[str, Any]] = None) -> int:
     """How many backend clarification fields still need a value."""
-    answers = answers or {}
-    return sum(
-        1 for field in clarification_fields(state) if _field_is_empty(field, answers.get(field))
-    )
+    return len(backend_missing_fields(state, answers))
 
 
 def need_details_title(count: int) -> str:
@@ -72,10 +127,7 @@ def need_details_title(count: int) -> str:
 
 
 def answers_look_complete(state: DesignState, answers: Optional[Dict[str, Any]]) -> bool:
-    """True when every backend clarification field has a non-empty user value."""
-    fields = clarification_fields(state)
-    if not fields:
-        return bool(state.requirements)
+    """True only when the backend would allow geometry to proceed."""
     return missing_detail_count(state, answers) == 0
 
 
@@ -158,11 +210,23 @@ def result_status(state: DesignState) -> Optional[str]:
     return "preliminary" if topo.is_mock else "unverified"
 
 
-def action_spec(state: DesignState, answers: Optional[Dict[str, Any]] = None) -> ActionSpec:
+def action_spec(
+    state: DesignState,
+    answers: Optional[Dict[str, Any]] = None,
+    failure: Any = None,
+) -> ActionSpec:
     """Single primary action for the current DesignState."""
     stage = _stage(state)
     phase = ui_phase(state, answers)
     status = result_status(state)
+    if failure is not None and stage != WorkflowStage.REJECTED:
+        return ActionSpec(
+            phase,
+            failure.headline,
+            "",
+            failure.primary_label,
+            "retry",
+        )
 
     if stage == WorkflowStage.REJECTED:
         return ActionSpec(
@@ -304,6 +368,15 @@ def action_spec(state: DesignState, answers: Optional[Dict[str, Any]] = None) ->
         WorkflowStage.DESIGN_REVIEW,
         WorkflowStage.TOPOLOGY_OPTIMIZATION,
     ) and state.topology is None:
+        missing = missing_detail_count(state, answers)
+        if missing:
+            return ActionSpec(
+                phase,
+                need_details_title(missing),
+                "",
+                "Continue",
+                "continue",
+            )
         return ActionSpec(
             phase,
             "Ready to optimize",
@@ -414,6 +487,39 @@ def scene_status_text(
         bits.append("registration present, low confidence")
     bits.append(geometry_mode)
     return " · ".join(bits)
+
+
+def workspace_tab_after_event(
+    *, reconstruction: bool = False, design: bool = False, topology: bool = False
+) -> str:
+    """Newest visual result wins. Presentation only."""
+    if topology:
+        return WORKSPACE_TAB_OPTIMIZATION
+    if design:
+        return WORKSPACE_TAB_DESIGN
+    if reconstruction:
+        return WORKSPACE_TAB_SCENE
+    return WORKSPACE_TAB_SCENE
+
+
+SCENE_STATUS_RECONSTRUCTED = "Scene reconstructed"
+SCENE_STATUS_PENDING = "Scene not reconstructed yet"
+
+
+def reconstructed_scene_status(
+    *,
+    reconstructed: bool = False,
+    photo_count: int = 0,
+    min_images: int = 8,
+) -> str:
+    """Status for the scene workspace. Never claims reconstruction without an artifact."""
+    if reconstructed:
+        return SCENE_STATUS_RECONSTRUCTED
+    needed = max(0, int(min_images) - max(0, int(photo_count)))
+    if needed:
+        noun = "photo" if needed == 1 else "photos"
+        return f"Add {needed} more {noun} to reconstruct"
+    return SCENE_STATUS_PENDING
 
 
 def stepper_states(current_phase: str, blocked: bool = False) -> Sequence[tuple[str, str]]:

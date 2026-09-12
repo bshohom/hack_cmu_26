@@ -12,9 +12,13 @@ from typing import Dict, List
 
 from agents.interaction import (
     PAYLOAD_KEYWORDS,
-    REQUIRED_FIELDS,
-    SIZE_QUESTIONS,
+    TASK_BED_HANDLE,
+    TASK_DESK_HOOK,
+    TASK_DESK_SHELF,
+    TASK_WALL_SHELF,
+    classify_design_task,
     classify_hazard,
+    clarification_specs_for_task,
 )
 from reasoning_contracts import (
     EnvelopeSemantics,
@@ -38,8 +42,17 @@ def _unit_for(field: str) -> str:
 
 
 def payload_kind_from_text(text: str) -> tuple[str, str]:
-    """(description, kind) from the keyword table — the overfit path, kept as fallback."""
+    """(description, kind) from the task pack, then the keyword table."""
     lowered = (text or "").lower()
+    task = classify_design_task(text)
+    if task == TASK_BED_HANDLE:
+        return "assist_load", "handle"
+    if task == TASK_WALL_SHELF:
+        return ("router" if "router" in lowered else "object"), "box"
+    if task == TASK_DESK_HOOK:
+        return "bag", "strap"
+    if task == TASK_DESK_SHELF:
+        return "object", "box"
     for keyword, description, kind in PAYLOAD_KEYWORDS:
         if keyword in lowered:
             return description, kind
@@ -56,32 +69,48 @@ FIELD_AFFECTS = {
     "allowed_contact_region": ("envelope", "bounds where the part may touch the mount"),
     "max_protrusion_mm": ("envelope", "bounds how far the part may extend"),
     "manufacturing_method": ("manufacturing", "sets printable feature sizes"),
+    "supported_load_kg": ("capacity", "sets the load the part must carry"),
+    "payload_size_mm": ("fit", "sets the payload interface size"),
+    "required_reach_mm": ("envelope", "bounds how far the part may extend"),
+    "wall_clearance_mm": ("envelope", "bounds clearance around the part"),
+    "attachment_structure": ("capacity", "decides what the part mounts to"),
+    "handle_location": ("fit", "places the grip relative to the user"),
+    "mounting_region": ("envelope", "bounds where the part may touch the mount"),
+    "drilling_allowed": ("capacity", "decides whether fasteners may penetrate the mount"),
 }
 
 
 def plan_measurements(request_text: str) -> MeasurementPlan:
     description, kind = payload_kind_from_text(request_text)
+    task = classify_design_task(request_text)
     requests: List[MeasurementRequest] = []
-    for field, question, priority in REQUIRED_FIELDS:
-        if field == "bottle_diameter_mm":
-            question = SIZE_QUESTIONS.get(kind, question)
-        affects, why = FIELD_AFFECTS.get(field, ("other", "required by the deterministic questionnaire"))
+    for spec in clarification_specs_for_task(task, description):
+        field = spec["field"]
+        affects, why = FIELD_AFFECTS.get(
+            field, ("other", spec.get("reason") or "required for this task")
+        )
         requests.append(
             MeasurementRequest(
                 field=field,
-                question=question.format(payload=description),
-                unit=_unit_for(field),
+                question=spec["question"],
+                unit=spec.get("unit") or _unit_for(field),
                 why_it_matters=why,
                 affects=affects,
-                priority=priority,
+                priority=spec.get("priority") or "high",
             )
         )
+    mount = {
+        TASK_BED_HANDLE: "bed",
+        TASK_WALL_SHELF: "wall",
+        TASK_DESK_HOOK: "desk edge",
+        TASK_DESK_SHELF: "desk edge",
+    }.get(task, "desk edge")
     return MeasurementPlan(
         payload_description=description,
         payload_kind=kind,
-        mount_description="desk edge",
+        mount_description=mount,
         requests=requests,
-        assumptions=["measurement set taken from the fixed questionnaire, not reasoned"],
+        assumptions=["measurement set taken from the task questionnaire, not reasoned"],
         notes="deterministic fallback plan",
     )
 

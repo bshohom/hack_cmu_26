@@ -164,6 +164,8 @@ class UserRequirements(BaseModel):
     manufacturing: ManufacturingConstraints = Field(default_factory=ManufacturingConstraints)
     part_mass: PartMassConstraint = Field(default_factory=PartMassConstraint)
     vision: VisionRequest = Field(default_factory=VisionRequest)
+    task_kind: str = ""
+    task_answers: Dict[str, Any] = Field(default_factory=dict)
 
 
 class RequirementsUpdate(BaseModel):
@@ -180,6 +182,14 @@ class RequirementsUpdate(BaseModel):
     manufacturing_method: Optional[str] = None
     material: Optional[str] = None
     max_part_mass_kg: Optional[float] = None
+    supported_load_kg: Optional[float] = None
+    payload_size_mm: Optional[float] = None
+    required_reach_mm: Optional[float] = None
+    wall_clearance_mm: Optional[float] = None
+    attachment_structure: Optional[str] = None
+    handle_location: Optional[str] = None
+    mounting_region: Optional[str] = None
+    drilling_allowed: Optional[bool] = None
 
 
 class MassProvenance(str, Enum):
@@ -206,6 +216,11 @@ class ClarificationQuestion(BaseModel):
     field: str
     question: str
     priority: str = "medium"
+    kind: Optional[str] = None
+    unit: Optional[str] = None
+    options: Optional[List[str]] = None
+    reason: Optional[str] = None
+    source: Optional[str] = None
 
 
 class InteractionResult(BaseModel):

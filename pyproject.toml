@@ -21,12 +21,32 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
+registration = [
+  # Depth Anything 3 must be installed separately with --no-deps (see README).
+  # Its own pyproject pins numpy<2 and pulls moviepy/evo/gsplat extras that
+  # fight this env's numpy 2 / pandas 3 stack.
+  "evo>=1.37",
+  "gradio>=6.17",
+  "matplotlib>=3.10",
+  "moviepy==1.0.3",
+  "omegaconf>=2.3",
+  "open3d>=0.19",
+  "opencv-python>=4.13",
+  "pillow>=12",
+  "pillow-heif>=1.7",
+  "plyfile>=1.1",
+  "pycolmap>=4.2",
+  "scikit-learn>=1.8",
+  "scipy>=1.17",
+  "shapely>=2.1",
+  "transformers>=5.5.4",
+]
 
 [project.scripts]
 to-agent = "to_agent.cli:app"
 
 [tool.setuptools.packages.find]
-include = ["to_agent*"]
+include = ["to_agent*", "surfcap*"]
 
 [tool.ruff]
 line-length = 100

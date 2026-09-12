@@ -9,6 +9,7 @@ implementations of registration, FEM, or topology optimization.
 
 from __future__ import annotations
 
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Set, Tuple
@@ -112,6 +113,7 @@ class Orchestrator:
         topology_log=None,
         topology_progress=None,
         warm_start_generator=None,
+        run_trace=None,
     ) -> None:
         self.state = DesignState()
         self.fixtures = fixtures or IntegrationFixtures()
@@ -129,6 +131,7 @@ class Orchestrator:
         # warm-start candidate (e.g. Grok-written trimesh script) when none was imported.
         self.warm_start_generator = warm_start_generator
         self.warm_start_error: Optional[str] = None
+        self.run_trace = run_trace
         self._handlers = {
             WorkflowStage.REQUIREMENTS: self._handle_requirements,
             WorkflowStage.REQUEST_INFORMATION: self._handle_request_information,
@@ -146,6 +149,13 @@ class Orchestrator:
             WorkflowStage.TOPOLOGY_FAILED: self._handle_complete,
             WorkflowStage.VERIFICATION_FAILED: self._handle_complete,
         }
+
+    def _emit(self, event: str, detail: str = "") -> None:
+        line = f"[RUN] {event}" + (f" {detail}" if detail else "")
+        print(line, flush=True)
+        cb = self.run_trace
+        if cb is not None:
+            cb(event, detail)
 
     def ingest_user_request(self, message: str) -> DesignState:
         before = self._snapshot()
@@ -223,6 +233,27 @@ class Orchestrator:
         self.state.stage = WorkflowStage.REQUEST_INFORMATION
         self.state.interaction_decision = InteractionDecision.REQUEST_INFORMATION
         self.state.notes = note
+        req = self.state.requirements
+        if req is None:
+            print(
+                f"[GEOMETRY] returning request_information because = {note} "
+                "(no requirements)",
+                flush=True,
+            )
+            return
+        result = self.interaction._decide(req)
+        if result.questions:
+            self.state.clarifications = result.questions
+            self.state.missing_information = [
+                MissingInformation(field=q.field, reason=q.question, priority=q.priority)
+                for q in result.questions
+            ]
+        fields = [getattr(q, "field", None) for q in (self.state.clarifications or [])]
+        print(
+            f"[GEOMETRY] returning request_information because = {note} "
+            f"missing_fields = {fields}",
+            flush=True,
+        )
 
     def _block_contract(self, message: str) -> None:
         self.state.contract_error = message
@@ -243,7 +274,35 @@ class Orchestrator:
         return
 
     def _handle_geometry(self) -> None:
-        if not self._requirements_ready():
+        req = self.state.requirements
+        gaps = self._requirements_gaps()
+        print("[GEOMETRY] ENTER", flush=True)
+        print(
+            "[GEOMETRY] requirements = "
+            f"task={getattr(req, 'task_kind', '')!r} "
+            f"mass={getattr(getattr(req, 'payload', None), 'filled_mass_kg', None)} "
+            f"diameter={getattr(getattr(req, 'object_geometry', None), 'bottle_diameter_mm', None)} "
+            f"desk={getattr(getattr(req, 'environment', None), 'desk_thickness_mm', None)} "
+            f"method={getattr(getattr(req, 'attachment', None), 'method', None)!r} "
+            f"region={getattr(getattr(req, 'attachment', None), 'allowed_contact_region', None)!r} "
+            f"reach={getattr(getattr(req, 'design_envelope', None), 'max_protrusion_mm', None)} "
+            f"mfg={getattr(getattr(req, 'manufacturing', None), 'method', None)!r} "
+            f"answers={getattr(req, 'task_answers', None)}",
+            flush=True,
+        )
+        print(f"[GEOMETRY] missing_fields = {gaps}", flush=True)
+        print(
+            "[GEOMETRY] clarification_questions = "
+            f"{[getattr(q, 'field', None) for q in (self.state.clarifications or [])]}",
+            flush=True,
+        )
+        if gaps:
+            print(f"[GEOMETRY] blocker = requirements_gaps {gaps}", flush=True)
+            print(
+                "[GEOMETRY] returning request_information because = "
+                "Geometry needs complete requirements",
+                flush=True,
+            )
             self._request_info("Geometry needs complete requirements.")
             return
         run_reasoning_agent(ReasoningRole.GEOMETRY, self.state)
@@ -253,6 +312,10 @@ class Orchestrator:
         if self.fixtures.geometry is not None:
             self.state.geometry = self.fixtures.geometry
             if self.state.registration is None:
+                print(
+                    "[GEOMETRY] blocker = fixture geometry requires registration",
+                    flush=True,
+                )
                 self._block_contract(
                     "Contract/integration error: RegistrationOutput is required "
                     "before external GeometryOutput can advance to STRUCTURE."
@@ -278,7 +341,10 @@ class Orchestrator:
         if frame_error:
             self._block_contract(frame_error)
             return
+        if self.imported_candidate is not None:
+            self._emit("WARM_START_PRESENT", "existing candidate attached")
         if self.imported_candidate is None and self.warm_start_generator is not None:
+            print("[GEOMETRY] GROK_CALL_SITE_REACHED", flush=True)
             self.warm_start_error = None
             try:
                 generated = self.warm_start_generator(self.state.requirements)
@@ -287,6 +353,7 @@ class Orchestrator:
                 self.warm_start_error = f"{type(exc).__name__}: {exc}"
             if generated is not None:
                 self.imported_candidate = generated
+                self._emit("WARM_START_PRESENT", "generated this run")
             else:
                 self.state.notes = (
                     "Warm-start generation failed; continuing without a candidate mesh "
@@ -312,6 +379,11 @@ class Orchestrator:
             self.state.stage = WorkflowStage.FEASIBILITY_CHECK
             return
         questions = candidate_fit_questions(result, family=fit_family_for(candidate))
+        print(
+            "[GEOMETRY] returning request_information because = candidate does not fit "
+            f"fields={[getattr(q, 'field', None) for q in questions]}",
+            flush=True,
+        )
         self.state.stage = WorkflowStage.REQUEST_INFORMATION
         self.state.interaction_decision = InteractionDecision.REQUEST_INFORMATION
         self.state.clarifications = questions
@@ -455,12 +527,14 @@ class Orchestrator:
 
     def _handle_topology(self) -> None:
         if self.state.analysis is None:
+            self._emit("BLOCKED: TOPOLOGY_OPTIMIZATION requires AnalysisOutput")
             self._block_contract(
                 "Contract/integration error: TOPOLOGY_OPTIMIZATION requires "
                 "a valid AnalysisOutput."
             )
             return
         if self.state.geometry is None or self.state.structure is None:
+            self._emit("BLOCKED: topology needs geometry and structure")
             self._request_info("Topology optimization needs geometry and structure.")
             return
         req = self.state.requirements
@@ -470,8 +544,14 @@ class Orchestrator:
             material = req.manufacturing.material or "PLA"
             max_mass = req.part_mass.max_part_mass_kg
         if self.fixtures.topology is not None:
+            self._emit("TO_PROBLEM_BUILD_STARTED", "fixture topology")
             self.state.topology = self.fixtures.topology
+            self._emit("TO_PROBLEM_BUILD_FINISHED")
+            self._emit("TO_SOLVER_STARTED", "fixture")
+            self._emit("TO_SOLVER_FINISHED")
+            self._emit("TO_RESULT_ACCEPTED", "fixture topology")
         else:
+            self._emit("TO_PROBLEM_BUILD_STARTED")
             inp = TopologyInput(
                 design_domain=self.state.geometry.part,
                 fixed_regions=self.state.structure.attachment_regions,
@@ -489,11 +569,15 @@ class Orchestrator:
                 payload_size_mm=self.state.geometry.payload_object.bottle_diameter_mm,
                 structure=self.state.structure,
             )
+            self._emit("TO_PROBLEM_BUILD_FINISHED")
+            self._emit("TO_SOLVER_STARTED")
             try:
                 self.state.topology = run_topology_optimization(
                     inp, log=self.topology_log, progress=self.topology_progress
                 )
             except TopologyUnavailable as exc:
+                print("[RUN] EXCEPTION at TO_SOLVER", flush=True)
+                traceback.print_exc()
                 self.state.stage = WorkflowStage.TOPOLOGY_FAILED
                 self.state.safety_status = SafetyStatus.NEEDS_REVIEW
                 self.state.notes = (
@@ -501,6 +585,8 @@ class Orchestrator:
                     "No CAD artifact was written and the run did not continue on a placeholder."
                 )
                 return
+            self._emit("TO_SOLVER_FINISHED")
+            self._emit("RESULT_STORED")
         if self.state.analysis.is_mock or self.state.topology.is_mock:
             self.state.safety_status = SafetyStatus.UNVERIFIED
         self.state.stage = WorkflowStage.VERIFICATION
@@ -667,21 +753,15 @@ class Orchestrator:
     def _handle_complete(self) -> None:
         return
 
-    def _requirements_ready(self) -> bool:
+    def _requirements_gaps(self) -> List[str]:
+        """Same missing-field list the InteractionAgent uses. One readiness contract."""
         req = self.state.requirements
         if req is None:
-            return False
-        return all(
-            [
-                req.payload.filled_mass_kg is not None,
-                req.object_geometry.bottle_diameter_mm is not None,
-                req.environment.desk_thickness_mm is not None,
-                bool(req.attachment.method),
-                bool(req.attachment.allowed_contact_region),
-                req.design_envelope.max_protrusion_mm is not None,
-                bool(req.manufacturing.method),
-            ]
-        )
+            return ["requirements"]
+        return [spec["field"] for spec in self.interaction._missing(req)]
+
+    def _requirements_ready(self) -> bool:
+        return not self._requirements_gaps()
 
     def _requirement_geometry_mismatch(self) -> Optional[str]:
         req = self.state.requirements

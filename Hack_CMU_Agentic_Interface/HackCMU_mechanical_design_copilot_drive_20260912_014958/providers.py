@@ -424,6 +424,8 @@ class GrokReasoningProvider(_OpenAICompatibleProvider):
 
     def __init__(self) -> None:
         super().__init__()
+        load_dotenv()
+        load_dotenv(Path(__file__).resolve().parent / ".env")
         self.api_key = (
             os.environ.get("GROK_API_KEY")
             or os.environ.get("XAI_API_KEY")
