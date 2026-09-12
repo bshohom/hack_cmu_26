@@ -142,7 +142,7 @@ def build_generated_problem(candidate: dict, topology_input: dict, h: float, vol
         if m is None:
             continue
         box = _box(m, pad=0.5)
-        supports.append(Support(id=str(m.get("name") or f"mount_{i}"), region=box, confidence="generated"))
+        supports.append(Support(id=str(m.get("name") or f"mount_{i}"), region=box, provenance="assumed"))
         preserve.append(IntersectionRegion(regions=[mesh_region, _box(m, pad=h)]))
     if not supports:
         raise AdapterError("generated candidate regions have no mounts")
@@ -156,7 +156,7 @@ def build_generated_problem(candidate: dict, topology_input: dict, h: float, vol
         preserve=preserve,
         void=void,
         supports=supports,
-        load_cases=[LoadCase(id=load_id, region=load_box, force_N=force, confidence="user")],
+        load_cases=[LoadCase(id=load_id, region=load_box, force_N=force, provenance="user")],
         safety_factor=safety_factor,
         volume_fraction=volfrac,
         target_element_size=h,
@@ -189,7 +189,7 @@ def build_from_registry(candidate: dict, topology_input: dict, h: float, volfrac
         primary = problem.load_cases[0]
         primary.id = load_id
         primary.force_N = force
-        primary.confidence = "user"
+        primary.provenance = "user"
     return problem, report
 
 

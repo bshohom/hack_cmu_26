@@ -34,7 +34,10 @@ class StreamlitWidgetOwnershipTests(unittest.TestCase):
     def _app(self):
         from streamlit.testing.v1 import AppTest
 
-        at = AppTest.from_file("app.py", default_timeout=12)
+        # 60 s, not 12: app.py imports torch transitively, and under the full suite the
+        # first AppTest run contends with an already-warm CUDA context. The script itself
+        # takes well under a second in isolation.
+        at = AppTest.from_file("app.py", default_timeout=60)
         at.run()
         self.assertFalse(at.exception, msg=at.exception)
         return at

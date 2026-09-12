@@ -10,10 +10,35 @@ from pathlib import Path
 from typing import Annotated, Iterator, Literal, Union
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 Vec3 = tuple[float, float, float]
 Axis = Literal["x", "y", "z"]
+
+# Where a value came from. One vocabulary for the whole pipeline: registration
+# measurements, agent-supplied regions, and anything a builder invented.
+#   observed  - measured off a reconstruction of the real object
+#   user      - stated by the user
+#   derived   - computed from observed/user values
+#   assumed   - invented by a default because nothing better was available
+Provenance = Literal["observed", "user", "derived", "assumed"]
+
+# `confidence` was the original spelling; problem YAML in data/ still uses it.
+_PROVENANCE_FIELD = Field(
+    default=None, validation_alias=AliasChoices("provenance", "confidence")
+)
+
+
+class Assumption(BaseModel):
+    """One invented value that materially affects the result.
+
+    Anything the builder made up lands here so the UI can state it, instead of it
+    disappearing into a prose notes string.
+    """
+
+    field: str  # what was assumed, e.g. "supports"
+    value: str  # what it was set to
+    basis: str  # why, e.g. "no fixed_regions supplied; fell back to clamp layout"
 
 
 # ----------------------------------------------------------------------------- regions
@@ -131,14 +156,18 @@ class Material(BaseModel):
     nu: float = 0.35
     density_kg_m3: float | None = None
     yield_MPa: float | None = None
-    confidence: str | None = None
+    # Free text describing where these numbers come from (not the Provenance vocabulary:
+    # material values are always looked up, never observed or user-measured).
+    source_note: str | None = Field(
+        default=None, validation_alias=AliasChoices("source_note", "confidence")
+    )
 
 
 class Support(BaseModel):
     id: str
     region: Region
     fixed_dofs: list[Axis] = ["x", "y", "z"]
-    confidence: str | None = None
+    provenance: Provenance | None = _PROVENANCE_FIELD
 
 
 class LoadCase(BaseModel):
@@ -146,7 +175,7 @@ class LoadCase(BaseModel):
     region: Region
     force_N: Vec3  # total force; split equally over the nodes selected by `region`
     weight: float = 1.0
-    confidence: str | None = None
+    provenance: Provenance | None = _PROVENANCE_FIELD
 
 
 class TOProblem(BaseModel):
@@ -170,6 +199,8 @@ class TOProblem(BaseModel):
     max_iters: int = 40
     change_tol: float = 0.01
     notes: str | None = None
+    # Values the builder invented rather than took from the agent. Surfaced, not buried.
+    assumptions: list[Assumption] = []
 
     @model_validator(mode="after")
     def _check(self) -> TOProblem:

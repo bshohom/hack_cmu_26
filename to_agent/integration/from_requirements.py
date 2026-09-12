@@ -129,13 +129,13 @@ def build_from_requirements(
     if clamped:
         # The desk itself is forbidden material; the jaws grip its top and underside.
         void.append(BoxRegion(min=(x_lo - 2 * h, -half_w - 2 * h, 0.0), max=(0.0, half_w + 2 * h, desk_t)))
-        supports.append(Support(id="top_jaw", region=BoxRegion(min=(x_lo + 2.0, -half_w, desk_t), max=(-2.0, half_w, desk_t + h)), confidence="derived"))
-        supports.append(Support(id="bottom_jaw", region=BoxRegion(min=(x_lo + 2.0, -half_w, -h), max=(-2.0, half_w, 0.0)), confidence="derived"))
+        supports.append(Support(id="top_jaw", region=BoxRegion(min=(x_lo + 2.0, -half_w, desk_t), max=(-2.0, half_w, desk_t + h)), provenance="derived"))
+        supports.append(Support(id="bottom_jaw", region=BoxRegion(min=(x_lo + 2.0, -half_w, -h), max=(-2.0, half_w, 0.0)), provenance="derived"))
         preserve.append(BoxRegion(min=(x_lo, -half_w, desk_t), max=(-1.0, half_w, desk_t + CONTACT_MM)))
         preserve.append(BoxRegion(min=(x_lo, -half_w, -CONTACT_MM), max=(-1.0, half_w, 0.0)))
     else:
         # Free-standing: the part is bonded to the desk top over its footprint.
-        supports.append(Support(id="base", region=BoxRegion(min=(x_lo, -half_w, z_lo - h), max=(x_hi * 0.6, half_w, z_lo + h)), confidence="derived"))
+        supports.append(Support(id="base", region=BoxRegion(min=(x_lo, -half_w, z_lo - h), max=(x_hi * 0.6, half_w, z_lo + h)), provenance="derived"))
         preserve.append(BoxRegion(min=(x_lo, -half_w, z_lo), max=(x_hi * 0.6, half_w, z_lo + CONTACT_MM)))
 
     # The payload contact patch is preserved and loaded.
@@ -149,14 +149,14 @@ def build_from_requirements(
 
     material, mat_note = material_from_name(topology_input.get("material"))
     load_cases = [
-        LoadCase(id=load_id, region=BoxRegion(min=(load_x - half_px, -half_py, load_z - h), max=(load_x + half_px, half_py, load_z + CONTACT_MM)), force_N=force, confidence="user"),
+        LoadCase(id=load_id, region=BoxRegion(min=(load_x - half_px, -half_py, load_z - h), max=(load_x + half_px, half_py, load_z + CONTACT_MM)), force_N=force, provenance="user"),
     ]
     mag = max(abs(v) for v in force) or 1.0
     if kind == "strap":
         # Outward pull keeps the retaining lip structural instead of dead weight.
-        load_cases.append(LoadCase(id="outward_pull", region=load_cases[0].region, force_N=(0.4 * mag, 0.0, 0.0), weight=0.6, confidence="assumed"))
+        load_cases.append(LoadCase(id="outward_pull", region=load_cases[0].region, force_N=(0.4 * mag, 0.0, 0.0), weight=0.6, provenance="assumed"))
     else:
-        load_cases.append(LoadCase(id="side_bump", region=load_cases[0].region, force_N=(0.0, 0.3 * mag, 0.0), weight=0.4, confidence="assumed"))
+        load_cases.append(LoadCase(id="side_bump", region=load_cases[0].region, force_N=(0.0, 0.3 * mag, 0.0), weight=0.4, provenance="assumed"))
 
     warm_start, warm_note = structure_warm_start(topology_input.get("structure"), min_radius=1.5 * h)
     problem = TOProblem(

@@ -19,11 +19,11 @@ from ..contracts import Material
 PRINTED = "as-printed FDM values (XY modulus, Z-direction yield)"
 
 PRESETS: dict[str, Material] = {
-    "pla": Material(name="PLA (FDM printed)", E_MPa=2300.0, nu=0.35, density_kg_m3=1240.0, yield_MPa=30.0, confidence=PRINTED),
-    "petg": Material(name="PETG (FDM printed)", E_MPa=1900.0, nu=0.37, density_kg_m3=1270.0, yield_MPa=22.0, confidence=PRINTED),
-    "abs": Material(name="ABS (FDM printed)", E_MPa=1900.0, nu=0.35, density_kg_m3=1040.0, yield_MPa=18.0, confidence=PRINTED),
-    "asa": Material(name="ASA (FDM printed)", E_MPa=1900.0, nu=0.35, density_kg_m3=1070.0, yield_MPa=20.0, confidence=PRINTED),
-    "nylon": Material(name="Nylon (FDM printed)", E_MPa=1400.0, nu=0.40, density_kg_m3=1130.0, yield_MPa=25.0, confidence=PRINTED),
+    "pla": Material(name="PLA (FDM printed)", E_MPa=2300.0, nu=0.35, density_kg_m3=1240.0, yield_MPa=30.0, source_note=PRINTED),
+    "petg": Material(name="PETG (FDM printed)", E_MPa=1900.0, nu=0.37, density_kg_m3=1270.0, yield_MPa=22.0, source_note=PRINTED),
+    "abs": Material(name="ABS (FDM printed)", E_MPa=1900.0, nu=0.35, density_kg_m3=1040.0, yield_MPa=18.0, source_note=PRINTED),
+    "asa": Material(name="ASA (FDM printed)", E_MPa=1900.0, nu=0.35, density_kg_m3=1070.0, yield_MPa=20.0, source_note=PRINTED),
+    "nylon": Material(name="Nylon (FDM printed)", E_MPa=1400.0, nu=0.40, density_kg_m3=1130.0, yield_MPa=25.0, source_note=PRINTED),
 }
 
 
@@ -41,5 +41,5 @@ def material_from_name(name: str | None) -> tuple[Material, str]:
     if key in PRESETS:
         return PRESETS[key].model_copy(), ""
     m = PRESETS["pla"].model_copy()
-    m.confidence = f"assumed: '{name}' unknown, PLA printed values used"
+    m.source_note = f"assumed: '{name}' unknown, PLA printed values used"
     return m, f"material '{name}' unknown; using PLA printed properties"
