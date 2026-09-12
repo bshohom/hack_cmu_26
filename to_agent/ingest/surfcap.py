@@ -27,6 +27,9 @@ _THICKNESS_PROVENANCE = {
     "top-bottom planes": "observed",
     "front face extent": "observed",
     "slab top/bottom faces": "observed",
+    # Planar mesh case B closes the solid at the lowest point of an actually observed
+    # vertical face. It is measured geometry, unlike the synthetic case-A underside.
+    "vertical_faces": "observed",
     "arg": "user",
     "default": "assumed",
     "obb": "assumed",
@@ -37,17 +40,64 @@ _THICKNESS_PROVENANCE = {
 }
 
 
-def thickness_provenance(source: str | None) -> str:
-    """Unknown sources are 'assumed': absence of provenance is not provenance."""
-    return _THICKNESS_PROVENANCE.get((source or "none").strip().lower(), "assumed")
+def thickness_provenance(source: str | None, mesh_stats: dict | None = None) -> str:
+    """Classify thickness evidence, with synthetic closure always taking precedence."""
+    provenance = _THICKNESS_PROVENANCE.get(
+        (source or "none").strip().lower(), "assumed"
+    )
+    stats = mesh_stats or {}
+    if stats.get("bottom_observed") is True or stats.get("mirrored_underside") is False:
+        return "observed"
+    if stats.get("mirrored_underside") is True or stats.get("mirror_closed") is True:
+        return "assumed"
+    return provenance
 
 
 def measurements_from_path(path: str | Path) -> dict[str, Any]:
-    """Dispatch: surfcap target.json, or a registered scene mesh (metres, Z-up, mount face at z≈0)."""
-    path = Path(path)
+    """Dispatch a surfcap contract or mesh.
+
+    A mesh beside ``target.json`` uses that contract for scale/provenance and the mesh only
+    for geometry statistics.  A standalone mesh keeps the conservative geometry-only path.
+    """
+    path = Path(path).expanduser().resolve()
     if path.suffix.lower() in MESH_SUFFIXES:
+        target_path = path.parent / "target.json"
+        if target_path.is_file() and path.name in {
+            "target.ply",
+            "target_clean.ply",
+            "target_mesh.ply",
+            "target_mesh.glb",
+            "target_mesh_hybrid.ply",
+            "target_mesh_hybrid.glb",
+        }:
+            measurements = target_to_measurements(target_path)
+            measurements.update(_scene_mesh_summary(path))
+            measurements["source_mesh"] = str(path)
+            measurements["measurement_contract"] = str(target_path)
+            measurements["notes"] = [
+                "scale and measurement provenance loaded from adjacent target.json",
+                *measurements.get("notes", []),
+            ]
+            return measurements
         return scene_mesh_to_measurements(path)
     return target_to_measurements(path)
+
+
+def _scene_mesh_summary(path: Path) -> dict[str, Any]:
+    """Return non-authoritative geometry facts for a reconstructed mesh."""
+    import trimesh
+
+    mesh = trimesh.load(path, force="mesh")
+    if mesh.is_empty or len(mesh.faces) == 0:
+        raise ValueError(f"{path} has no faces")
+    extent = np.asarray(mesh.extents, float)
+    scale = 1000.0 if float(max(extent)) < 5.0 else 1.0
+    return {
+        "mesh_extent_mm": [round(float(v * scale), 1) for v in extent],
+        "mesh_watertight": bool(mesh.is_watertight),
+        "mesh_vertices": int(len(mesh.vertices)),
+        "mesh_faces": int(len(mesh.faces)),
+    }
 
 
 def scene_mesh_to_measurements(path: str | Path, mesh_stats: dict | None = None) -> dict[str, Any]:
@@ -87,8 +137,14 @@ def scene_mesh_to_measurements(path: str | Path, mesh_stats: dict | None = None)
     # those two faces then just returns the number that was used to build them, so this is
     # only an observation once surfcap reports that a bottom plane was actually seen.
     # (Handed to the surfcap owner: emit `mirrored_underside` in the postprocess stats.)
-    observed_bottom = bool(mesh_stats and mesh_stats.get("mirrored_underside") is False)
-    provenance = thickness_provenance(source) if observed_bottom else "assumed"
+    observed_bottom = bool(
+        mesh_stats
+        and (
+            mesh_stats.get("mirrored_underside") is False
+            or mesh_stats.get("bottom_observed") is True
+        )
+    )
+    provenance = thickness_provenance(source, mesh_stats) if observed_bottom else "assumed"
     confidence = 0.75 if (ok and mesh.is_watertight and provenance == "observed") else 0.4
     if not ok:
         notes.append(f"thickness {thickness:.1f} mm is not a plausible mounting slab")
@@ -163,6 +219,14 @@ def target_to_measurements(path: str | Path) -> dict[str, Any]:
     if post.get("thickness_m"):
         thickness_mm = float(post["thickness_m"]) * 1000.0
         thickness_source = post.get("thickness_source", "postprocess")
+    elif (
+        post.get("thickness_source") == "vertical_faces"
+        and post.get("z_min") is not None
+    ):
+        # In surfcap's world frame the mount plane is z=0. Planar case B records
+        # the lowest observed vertical-face point as z_min.
+        thickness_mm = abs(float(post["z_min"])) * 1000.0
+        thickness_source = "vertical_faces"
     elif top is not None and bottom is not None:
         thickness_mm = abs(float(top["centroid"][2]) - float(bottom["centroid"][2])) * 1000.0
         thickness_source = "top-bottom planes"
@@ -175,7 +239,7 @@ def target_to_measurements(path: str | Path) -> dict[str, Any]:
         conf = round(conf * 0.7, 3)
         reasons.append("thickness from OBB minor extent")
 
-    provenance = thickness_provenance(thickness_source)
+    provenance = thickness_provenance(thickness_source, post)
     if thickness_mm is not None and provenance != "observed":
         reasons.append(
             f"thickness is {provenance}, not measured (source: {thickness_source}); "
@@ -198,6 +262,10 @@ def target_to_measurements(path: str | Path) -> dict[str, Any]:
         "thickness_provenance": provenance,
         "mount_normal": top.get("normal") if top else None,
         "mount_extent_mm": [round(float(v) * 1000.0, 1) for v in top["extent_m"]] if top and top.get("extent_m") else None,
+        "mount_polygon_mm": [
+            [round(float(v) * 1000.0, 1) for v in point]
+            for point in top.get("polygon_3d", [])
+        ] if top else [],
         "front_edge_mm": None,
         "frame": {
             "origin_desc": target.get("frame", {}).get("origin_desc"),

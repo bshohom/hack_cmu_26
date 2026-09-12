@@ -57,6 +57,14 @@ from reasoning import (
 )
 from reasoning_contracts import ReasoningMode, ReasoningOutcome
 from tools.warmstart import generate_warm_start
+from tools.registration import (
+    CAPTURE_GUIDANCE,
+    DEFAULT_OUT_ROOT as REGISTRATION_OUT_ROOT,
+    UploadedPhoto,
+    run_sample_registration,
+    run_registration,
+    stage_uploads,
+)
 from schemas import (
     InteractionResult,
     MassProvenance,
@@ -180,7 +188,10 @@ def _registration_measurements() -> Optional[Dict[str, Any]]:
         st.session_state.registration_meas = None
         return None
     cached = st.session_state.get("registration_meas")
-    if cached and cached.get("target_json") == path:
+    if cached and (
+        cached.get("source_mesh") == str(Path(path).expanduser().resolve())
+        or cached.get("target_json") == path
+    ):
         return cached
     try:
         from to_agent.ingest.surfcap import measurements_from_path
@@ -213,6 +224,61 @@ def _live_registration():
     )
 
 
+def _run_grounding_surface_registration() -> None:
+    """Stage UI uploads (or use a local folder), run surfcap, and queue its target path."""
+    st.session_state.registration_error = ""
+    uploads = st.session_state.get("reg_capture_photos") or []
+    folder_text = (st.session_state.get("reg_capture_folder") or "").strip()
+    try:
+        if uploads:
+            capture_dir = (
+                REGISTRATION_OUT_ROOT
+                / "captures"
+                / (
+                    f"capture_{time.strftime('%Y%m%d_%H%M%S')}_"
+                    f"{time.time_ns() % 1_000_000:06d}"
+                )
+            )
+            photos = [
+                UploadedPhoto(name=item.name, data=item.getvalue())
+                for item in uploads
+            ]
+            source, capture_warnings = stage_uploads(photos, capture_dir)
+        elif folder_text:
+            source = Path(folder_text).expanduser()
+            capture_warnings = []
+        else:
+            raise ValueError("Upload a photo set or provide a local capture folder.")
+
+        result = run_registration(
+            source,
+            table_prompt=st.session_state.get("reg_table_prompt") or "table",
+        )
+        result.warnings = list(dict.fromkeys(capture_warnings + result.warnings))
+        st.session_state.registration_run = result
+        if not result.ok:
+            st.session_state.registration_error = result.message
+            return
+        st.session_state.pending_reg_target_path = result.target_json
+        st.session_state.registration_meas = result.measurements
+    except Exception as exc:  # noqa: BLE001 — show capture/tool failures in the UI
+        st.session_state.registration_run = None
+        st.session_state.registration_error = f"{type(exc).__name__}: {exc}"
+
+
+def _load_table_a_registration() -> None:
+    """Run the callable registration skill against the bundled table_a capture."""
+    st.session_state.registration_error = ""
+    result = run_sample_registration("table_a")
+    st.session_state.registration_run = result
+    if not result.ok:
+        st.session_state.registration_error = result.message
+        return
+    measurement_path = result.artifacts.get("hybrid_mesh") or result.target_json
+    st.session_state.pending_reg_target_path = measurement_path
+    st.session_state.registration_meas = result.measurements
+
+
 def _new_orchestrator() -> Orchestrator:
     mode = effective_geometry_mode(st.session_state.get("mode_geom"))
     return Orchestrator(
@@ -225,6 +291,20 @@ def _new_orchestrator() -> Orchestrator:
 
 HOOK_CASE_MESSAGE = "I want a hook clamped under my desk edge to hang a 5 kg bag about 100 mm out from the edge."
 SHELF_CASE_MESSAGE = "I want a small shelf that lifts my stapler 100 mm above the desk with a flat top."
+SMALL_BOTTLE_CASE_MESSAGE = "Design a desk-clamped holder for a 0.5 kg, 66 mm diameter water bottle."
+SMALL_BOTTLE_CASE_ANSWERS = {
+    "filled_bottle_mass_kg": 0.5,
+    "bottle_diameter_mm": 66.0,
+    "bottle_height_mm": 130.0,
+    "desk_thickness_mm": 20.0,
+    "attachment_method": "clamp",
+    "allowed_contact_region": "desk_front_edge",
+    "attachment_notes": "clamp only, no drilling",
+    "max_protrusion_mm": 100.0,
+    "manufacturing_method": "3d_print",
+    "material": "PLA",
+    "max_part_mass_kg": 0.4,
+}
 HOOK_CASE_ANSWERS = {
     "filled_bottle_mass_kg": 5.0,
     "bottle_diameter_mm": 30.0,
@@ -263,6 +343,14 @@ def apply_pending_request_prefill(store: Dict[str, Any]) -> None:
     if pending is not None:
         store["request_text"] = pending
         store["pending_request_prefill"] = None
+
+
+def apply_pending_registration_path(store: Dict[str, Any]) -> None:
+    """Move a completed run's target path into the text widget before construction."""
+    pending = store.get("pending_reg_target_path")
+    if pending is not None:
+        store["reg_target_path"] = pending
+        store["pending_reg_target_path"] = None
 
 
 REASONING_CHOICES = ["Mock", "K2 Horizon", "Grok", "Cursor"]
@@ -316,6 +404,12 @@ def _init_session() -> None:
         st.session_state.compare = None
     if "pending_request_prefill" not in st.session_state:
         st.session_state.pending_request_prefill = None
+    if "pending_reg_target_path" not in st.session_state:
+        st.session_state.pending_reg_target_path = None
+    if "registration_run" not in st.session_state:
+        st.session_state.registration_run = None
+    if "registration_error" not in st.session_state:
+        st.session_state.registration_error = ""
     if "submitted_request" not in st.session_state:
         st.session_state.submitted_request = ""
     if "ui_notice" not in st.session_state:
@@ -336,6 +430,7 @@ def _init_session() -> None:
 
 def _apply_pending_prefills() -> None:
     apply_pending_request_prefill(st.session_state)
+    apply_pending_registration_path(st.session_state)
 
 
 def _clear_answer_widgets() -> None:
@@ -483,12 +578,28 @@ def _on_missing_info() -> None:
 
 def _load_live_case(candidate: str, message: str, answers: Dict[str, Any]) -> None:
     """Preset: imported candidate + live topology, request and answers prefilled."""
+    answers = dict(answers)
+    registration = st.session_state.get("registration_meas") or {}
+    if registration.get("prefill") and registration.get("desk_thickness_mm") is not None:
+        answers["desk_thickness_mm"] = float(registration["desk_thickness_mm"])
     st.session_state.mode_geom = GEOM_IMPORTED
     st.session_state.candidate_name = candidate
     st.session_state.mode_topo = "Live"
     _queue_request_text(message)
     _reset(ingest_message=message, prefill_happy=False)
-    st.session_state.answers = dict(answers)
+    st.session_state.answers = answers
+
+
+def _on_bottle_case() -> None:
+    answers = dict(SMALL_BOTTLE_CASE_ANSWERS)
+    registration = st.session_state.get("registration_meas") or {}
+    if registration.get("prefill") and registration.get("desk_thickness_mm") is not None:
+        answers["desk_thickness_mm"] = float(registration["desk_thickness_mm"])
+    st.session_state.mode_geom = GEOM_ADAPTIVE
+    st.session_state.mode_topo = "Live"
+    _queue_request_text(SMALL_BOTTLE_CASE_MESSAGE)
+    _reset(ingest_message=SMALL_BOTTLE_CASE_MESSAGE, prefill_happy=False)
+    st.session_state.answers = answers
 
 
 def _on_hook_case() -> None:
@@ -523,7 +634,18 @@ def _on_submit_request() -> None:
     _ingest(message)
 
 
+def sync_answer_widgets(store: Dict[str, Any]) -> None:
+    """Copy current clarification widget values before an on-click callback consumes them."""
+    answers = store.setdefault("answers", {})
+    for key in list(store.keys()):
+        if key.startswith("ans_"):
+            answers[key.removeprefix("ans_")] = store[key]
+    if store.get("no_drill"):
+        answers["attachment_notes"] = "clamp only, no drilling"
+
+
 def _on_continue_design() -> None:
+    sync_answer_widgets(st.session_state)
     _continue_design()
 
 
@@ -1211,6 +1333,16 @@ with st.sidebar:
         on_click=_on_rejected,
     )
     st.button(
+        "Load Small Bottle Holder Case (live TO)",
+        use_container_width=True,
+        on_click=_on_bottle_case,
+        help=(
+            "Requirements-derived 0.5 kg bottle holder with live topology optimization. "
+            "Uses the trusted registration thickness when one is loaded; no imported "
+            "candidate is forced onto an incompatible surface."
+        ),
+    )
+    st.button(
         "Load Desk Hook Case (live TO)",
         use_container_width=True,
         on_click=_on_hook_case,
@@ -1236,6 +1368,84 @@ with st.sidebar:
         "measurements when a surfcap target.json is provided. Structure, analysis, design review "
         "and safety status remain mocked / UNVERIFIED. Golden Fixture is a regression test."
     )
+    with st.expander("Reconstruct grounding surface", expanded=False):
+        st.caption(
+            "Runs the in-repo surfcap pipeline in an isolated subprocess. "
+            "The result is measurement evidence, not exact CAD or physical validation."
+        )
+        for step in CAPTURE_GUIDANCE:
+            st.write(f"- {step}")
+        st.button(
+            "Run bundled table_a capture",
+            use_container_width=True,
+            on_click=_load_table_a_registration,
+            help=(
+                "Runs the in-repo surfcap package against examples/surfcap/table_a and "
+                "uses target.json plus the reconstructed hybrid mesh."
+            ),
+        )
+        st.file_uploader(
+            "Capture photos",
+            type=["jpg", "jpeg", "png", "heic"],
+            accept_multiple_files=True,
+            key="reg_capture_photos",
+            help="Upload one unchanged 8–18-photo capture set; 14–18 is recommended.",
+        )
+        st.text_input(
+            "Or use a local capture folder",
+            key="reg_capture_folder",
+            placeholder="/path/to/photos",
+        )
+        st.text_input(
+            "Surface prompt",
+            key="reg_table_prompt",
+            value="table",
+            help="Only assists segmentation; mount-surface detection is geometry-first.",
+        )
+        if st.button("Run grounding-surface reconstruction", use_container_width=True):
+            with st.spinner("Running SAM, reconstruction, registration, and meshing…"):
+                _run_grounding_surface_registration()
+            if not st.session_state.registration_error:
+                st.rerun()
+        if st.session_state.registration_error:
+            st.error(st.session_state.registration_error)
+        _run = st.session_state.registration_run
+        if _run is not None and _run.ok:
+            st.success(
+                f"Reconstruction completed in {_run.elapsed_s:.1f}s. "
+                "Review the evidence and confirm any pre-filled measurement below."
+            )
+            st.write(
+                {
+                    "confidence": _run.measurements.get("confidence"),
+                    "thickness (mm)": _run.measurements.get("desk_thickness_mm"),
+                    "thickness provenance": _run.measurements.get("thickness_provenance"),
+                    "mount extent (mm)": _run.measurements.get("mount_extent_mm"),
+                    "hybrid mesh extent (mm)": _run.measurements.get("mesh_extent_mm"),
+                    "hybrid mesh watertight": _run.measurements.get("mesh_watertight"),
+                    "hybrid mesh faces": _run.measurements.get("mesh_faces"),
+                }
+            )
+            for key in ("top_view", "side_view"):
+                image = _run.artifacts.get(key)
+                if image and Path(image).is_file():
+                    st.image(image, caption=key.replace("_", " ").title(), use_container_width=True)
+            viewer = _run.artifacts.get("viewer")
+            if viewer and Path(viewer).is_file():
+                st.download_button(
+                    "Download reconstructed surface viewer",
+                    data=Path(viewer).read_bytes(),
+                    file_name=Path(viewer).name,
+                    mime="model/gltf-binary",
+                    use_container_width=True,
+                )
+            if _run.warnings:
+                with st.expander("Registration warnings"):
+                    for warning in _run.warnings:
+                        st.write(f"- {warning}")
+            if _run.log:
+                with st.expander("Surfcap log"):
+                    st.code(_run.log, language="text")
     st.text_input(
         "Registration output (surfcap target.json or scene mesh .ply, optional)",
         key="reg_target_path",
